@@ -112,6 +112,13 @@ def get_goal(goal_id: int) -> GoalRow | None:
     )
 
 
+def delete_goal(goal_id: int) -> bool:
+    """Delete a goal and all its plans/days/mastery/check-ins (FK cascade). Returns True if a row was removed."""
+    with conn() as c:
+        cur = c.execute("DELETE FROM goals WHERE id=?", (goal_id,))
+        return cur.rowcount > 0
+
+
 def list_goals() -> list[GoalRow]:
     with conn() as c:
         rows = c.execute("SELECT * FROM goals ORDER BY created_at DESC").fetchall()

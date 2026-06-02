@@ -150,6 +150,13 @@ async def list_goals():
     return [g.model_dump(mode="json") for g in goals]
 
 
+@router.delete("/goals/{goal_id}")
+async def delete_goal(goal_id: int):
+    if not db.delete_goal(goal_id):
+        raise HTTPException(404, "goal not found")
+    return {"deleted": goal_id}
+
+
 @router.get("/goals/{goal_id}/plan")
 async def get_plan(goal_id: int):
     plan = db.get_active_plan(goal_id)

@@ -54,11 +54,13 @@
   <h2>Past goals</h2>
   <ul class="goal-list">
     {% for g in goals %}
-      <li>
+      <li data-goal-id="{{ g.id }}">
         <a href="/goals/{{ g.id }}">
           <span class="goal-text">{{ g.text }}</span>
           <span class="muted small">{{ g.level }} · {{ g.deadline_days }} days · {{ g.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
         </a>
+        <button type="button" class="goal-delete" data-goal-id="{{ g.id }}"
+                title="Delete this goal" aria-label="Delete goal">✕</button>
       </li>
     {% endfor %}
   </ul>
@@ -141,6 +143,32 @@ form.addEventListener('submit', async (e) => {
     btn.disabled = false;
     btn.textContent = 'Generate plan →';
   }
+});
+
+// Delete a past goal (and its plan/mastery/check-ins).
+document.querySelectorAll('.goal-delete').forEach((delBtn) => {
+  delBtn.addEventListener('click', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const id = delBtn.dataset.goalId;
+    const li = delBtn.closest('li');
+    const label = li.querySelector('.goal-text')?.textContent?.trim() || `goal #${id}`;
+    if (!confirm(`Delete "${label}"? This removes its plan and progress and can't be undone.`)) return;
+
+    delBtn.disabled = true;
+    try {
+      const resp = await fetch(`/api/goals/${id}`, { method: 'DELETE' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+      li.remove();
+      const list = document.querySelector('.goal-list');
+      if (list && !list.children.length) {
+        document.querySelector('.past')?.remove();
+      }
+    } catch (err) {
+      alert(`Could not delete: ${err.message}`);
+      delBtn.disabled = false;
+    }
+  });
 });
 </script>
 

@@ -182,16 +182,26 @@ button.ghost-btn[data-active="false"] { color: var(--muted); }
   display: flex; flex-direction: column;
   gap: .5rem;
 }
-.goal-list li { margin: 0; }
+.goal-list li { margin: 0; position: relative; }
 .goal-list a {
   display: flex; justify-content: space-between; align-items: center;
-  padding: .85rem 1rem; gap: 1rem;
+  padding: .85rem 1rem; padding-right: 2.75rem; gap: 1rem;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius-sm); color: var(--text);
   transition: all var(--transition);
 }
 .goal-list a:hover { border-color: var(--accent-strong); background: var(--surface-2); transform: translateY(-1px); }
 .goal-list .goal-text { flex: 1; font-weight: 500; }
+.goal-delete {
+  position: absolute; top: 50%; right: .75rem; transform: translateY(-50%);
+  padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: none; border: none;
+  color: #d9534f; font-size: 1rem; line-height: 1; cursor: pointer;
+  transition: color var(--transition);
+}
+.goal-delete:hover { color: #b52b27; }
+.goal-delete:disabled { opacity: .4; cursor: default; }
 
 /* ============================================================
    Plan view
