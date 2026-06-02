@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}Day {{ day.day_num }} · {{ day.topic }}{% endblock %}
+{% block content %}
+
+<section>
+  <a href="javascript:history.back()" class="muted small">← Back to plan</a>
+  <h1>Day {{ day.day_num }}: {{ day.topic }}</h1>
+  <p class="muted">Status: <strong>{{ day.status }}</strong></p>
+
+  <h3>Objective</h3>
+  <p>{{ day.objective }}</p>
+
+  <h3>Concepts</h3>
+  <ul class="concepts">
+    {% for c in day.concepts %}<li>{{ c }}</li>{% endfor %}
+  </ul>
+
+  {% if day.activities %}
+    <h3>Activities</h3>
+    <ul>
+      {% for a in day.activities %}<li>{{ a }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+
+  {% if day.suggested_resources %}
+    <h3>Suggested resources</h3>
+    <ul>
+      {% for r in day.suggested_resources %}<li>{{ r }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+
+  <hr>
+
+  <h2>Check-in</h2>
+
+  {% if latest %}
+    <p class="muted">Last completed score: <strong>{{ '%.0f' | format(latest.overall_score * 100) }}%</strong></p>
+    {% for a in latest.answers %}
+      <details class="past-answer">
+        <summary>{{ a.question.kind | upper }} — {{ a.question.concept }} ({{ '%.2f' | format(a.grade.score) }})
+          {% if a.grade.confidence %}<span class="conf conf-{{ a.grade.confidence }}">conf: {{ a.grade.confidence }}</span>{% endif %}
+        </summary>
+        <p><strong>Q:</strong> {{ a.question.prompt }}</p>
+        <p><strong>Your answer:</strong> {{ a.answer_text }}</p>
+        <p><strong>Feedback:</strong> {{ a.grade.feedback }}</p>
+        {% if a.grade.gaps %}<p><strong>Gaps:</strong> {{ a.grade.gaps | join(', ') }}</p>{% endif %}
+        {% if a.grade.reasoning or a.grade.self_check %}
+          <details class="thinking nested">
+            <summary>🧠 Grader's thinking</summary>
+            {% if a.grade.reasoning %}<p><strong>Reasoning:</strong> {{ a.grade.reasoning }}</p>{% endif %}
+            {% if a.grade.self_check %}<p><strong>Self-check:</strong> {{ a.grade.self_check }}</p>{% endif %}
+          </details>
+        {% endif %}
+      </details>
+    {% endfor %}
+    <button class="primary" id="restart-btn"
+            hx-post="/api/days/{{ day.id }}/checkin/start"
+            hx-target="#checkin"
+            hx-swap="innerHTML"
+            hx-indicator="#loading">Start a new check-in</button>
+  {% else %}
+    <button class="primary"
+            hx-post="/api/days/{{ day.id }}/checkin/start"
+            hx-target="#checkin"
+            hx-swap="innerHTML"
+            hx-indicator="#loading">Start check-in</button>
+  {% endif %}
+
+  <div id="loading" class="htmx-indicator muted">Designing questions…</div>
+  <div id="checkin"></div>
+</section>
+
+<script>
+// HTMX returns JSON from the /api/* endpoint; rendering is done client-side here.
+// (The /api/* routes are intentionally JSON so they're reusable. Web UI does light
+// templating of the JSON below — small enough to keep inline.)
+document.body.addEventListener('htmx:afterRequest', (e) => {
+  const tgt = e.detail.target;
+  if (!tgt || tgt.id !== 'checkin') return;
+  if (!e.detail.successful) { tgt.innerHTML = `<p class="error">${e.detail.xhr.responseText || 'Request failed'}</p>`; return; }
+  try {
+    const data = JSON.parse(e.detail.xhr.responseText);
+    if (data.questions) {
+      renderQuestions(data);
+    } else if (data.grade) {
+      renderGrade(data);
+    }
+  } catch (err) { /* not JSON — leave as-is */ }
+});
+
+const PLAN_DAY_ID = {{ day.id }};
+let activeQuestions = [];
+let activeIndex = 0;
+
+let checkinReasoning = '';
+let checkinSelfCheck = '';
+
+function renderQuestions(data) {
+  activeQuestions = data.questions;
+  checkinReasoning = data.reasoning || '';
+  checkinSelfCheck = data.self_check || '';
+  activeIndex = 0;
+  document.getElementById('checkin').innerHTML = thinkingHTML('Why these questions?', checkinReasoning, checkinSelfCheck) + questionHTML(0);
+}
+
+function thinkingHTML(title, reasoning, selfCheck) {
+  if (!reasoning && !selfCheck) return '';
+  return `
+    <details class="thinking">
+      <summary>🧠 ${title}</summary>
+      ${reasoning ? `<p><strong>Reasoning:</strong> ${escapeHTML(reasoning)}</p>` : ''}
+      ${selfCheck ? `<p><strong>Self-check:</strong> ${escapeHTML(selfCheck)}</p>` : ''}
+    </details>
+  `;
+}
+
+function escapeHTML(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function questionHTML(i) {
+  const q = activeQuestions[i];
+  return `
+    <div class="question-card">
+      <p class="q-meta"><strong>Q${i + 1}/${activeQuestions.length}</strong> · ${q.kind} · <em>${q.concept}</em></p>
+      <p class="q-prompt">${q.prompt}</p>
+      <textarea id="answer-input" rows="5" placeholder="Your answer..."></textarea>
+      <button class="primary" onclick="submitAnswer(${i})">Submit answer</button>
+    </div>
+    <div id="grade-out"></div>
+  `;
+}
+
+async function submitAnswer(i) {
+  const txt = document.getElementById('answer-input').value.trim();
+  if (!txt) return;
+  const out = document.getElementById('grade-out');
+  out.innerHTML = '<p class="muted">Grading…</p>';
+  const r = await fetch(`/api/days/${PLAN_DAY_ID}/checkin/answer`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({question_index: i, answer_text: txt}),
+  });
+  if (!r.ok) { out.innerHTML = `<p class="error">${await r.text()}</p>`; return; }
+  const data = await r.json();
+  renderGrade(data);
+}
+
+function renderGrade(data) {
+  const g = data.grade;
+  const gaps = g.gaps && g.gaps.length ? `<p><strong>Gaps:</strong> ${escapeHTML(g.gaps.join(', '))}</p>` : '';
+  const confidence = g.confidence ? `<span class="conf conf-${g.confidence}">confidence: ${g.confidence}</span>` : '';
+  let html = `
+    <div class="grade-card ${g.correct ? 'ok' : 'partial'}">
+      <p><strong>Score: ${g.score.toFixed(2)}</strong> ${g.correct ? '✓' : ''} ${confidence}</p>
+      <p>${escapeHTML(g.feedback)}</p>
+      ${gaps}
+      ${thinkingHTML('How the grader thought about this', g.reasoning, g.self_check)}
+    </div>
+  `;
+  if (data.is_last) {
+    const r = data.result;
+    html += `<div class="summary-card">
+      <h3>Check-in complete</h3>
+      <p>Overall: <strong>${(r.overall_score * 100).toFixed(0)}%</strong></p>
+      ${r.next_focus.length ? `<p>Next session focus: ${r.next_focus.join(', ')}</p>` : ''}
+      <a href="" onclick="location.reload();return false;">Refresh page</a>
+    </div>`;
+  } else {
+    html += `<button class="primary" onclick="nextQuestion()">Next question →</button>`;
+  }
+  document.getElementById('grade-out').innerHTML = html;
+}
+
+function nextQuestion() {
+  activeIndex++;
+  document.getElementById('checkin').innerHTML = questionHTML(activeIndex);
+}
+</script>
+
+{% endblock %}

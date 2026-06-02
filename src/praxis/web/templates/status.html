@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+{% block title %}Gateway — Praxis{% endblock %}
+{% block content %}
+
+<section class="gateway-page">
+  <header class="page-header">
+    <div>
+      <h1>Gateway</h1>
+      <p class="muted">Live status of the multi-provider LLM router. Auto-refreshes every 3 s.</p>
+    </div>
+    <div class="page-actions">
+      <button id="refresh-toggle" class="ghost-btn" data-active="true">⏸ Pause</button>
+      <button id="refresh-now" class="ghost-btn">↻ Refresh now</button>
+    </div>
+  </header>
+
+  <!-- Top-level KPIs -->
+  <div id="kpis" class="kpi-row">
+    <div class="kpi"><span class="kpi-label">Total calls today</span><span class="kpi-value" id="kpi-total">—</span></div>
+    <div class="kpi"><span class="kpi-label">Errors</span><span class="kpi-value" id="kpi-errors">—</span></div>
+    <div class="kpi"><span class="kpi-label">Tokens today</span><span class="kpi-value" id="kpi-tokens">—</span></div>
+    <div class="kpi"><span class="kpi-label">Avg latency</span><span class="kpi-value" id="kpi-latency">—</span></div>
+    <div class="kpi"><span class="kpi-label">Active providers</span><span class="kpi-value" id="kpi-providers">—</span></div>
+  </div>
+
+  <!-- Provider cards -->
+  <h2>Providers</h2>
+  <p class="muted small" id="order-line"></p>
+  <div id="provider-grid" class="provider-grid">
+    <p class="muted">Loading…</p>
+  </div>
+
+  <!-- Log viewer -->
+  <header class="logs-header">
+    <h2>Recent calls</h2>
+    <div class="log-filters">
+      <select id="filter-provider">
+        <option value="">All providers</option>
+      </select>
+      <select id="filter-status">
+        <option value="">All statuses</option>
+        <option value="ok">Success</option>
+        <option value="error">Errors only</option>
+      </select>
+      <select id="filter-limit">
+        <option value="50">50 rows</option>
+        <option value="100" selected>100 rows</option>
+        <option value="250">250 rows</option>
+      </select>
+    </div>
+  </header>
+  <div class="log-table-wrap">
+    <table class="log-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Provider</th>
+          <th>Model</th>
+          <th>Status</th>
+          <th class="num">Latency</th>
+          <th class="num">In tok</th>
+          <th class="num">Out tok</th>
+          <th>Error / Failover</th>
+        </tr>
+      </thead>
+      <tbody id="log-tbody"><tr><td colspan="8" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+const REFRESH_MS = 3000;
+let refreshTimer = null;
+let refreshActive = true;
+
+// ---- formatting helpers ----
+function fmtTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  const h = String(d.getHours()).padStart(2, '0');
+  const m = String(d.getMinutes()).padStart(2, '0');
+  const s = String(d.getSeconds()).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+function fmtAgo(ts) {
+  if (!ts) return '—';
+  const sec = (Date.now() / 1000) - ts;
+  if (sec < 60) return `${Math.round(sec)}s ago`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
+  return `${Math.round(sec / 3600)}h ago`;
+}
+function fmtNum(n) {
+  if (n == null) return '—';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(n);
+}
+function fmtMs(ms) {
+  if (ms == null) return '—';
+  if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
+  return Math.round(ms) + 'ms';
+}
+function escapeHTML(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ---- provider card ----
+function providerCard(name, s, today) {
+  const rpmPct = Math.min(100, (s.rpm_used / s.rpm_limit) * 100);
+  const rpdPct = Math.min(100, (s.rpd_used / s.rpd_limit) * 100);
+  const tpmPct = Math.min(100, (s.tpm_used / s.tpm_limit) * 100);
+
+  let statusClass = 'ok', statusText = 'ACTIVE';
+  if (s.backoff_remaining > 0) {
+    statusClass = 'err';
+    statusText = `BACKOFF ${Math.round(s.backoff_remaining)}s`;
+  } else if (s.cooldown_remaining > 0) {
+    statusClass = 'warn';
+    statusText = `COOLDOWN ${s.cooldown_remaining.toFixed(1)}s`;
+  } else if (rpmPct >= 80 || rpdPct >= 80 || tpmPct >= 80) {
+    statusClass = 'warn';
+    statusText = 'THROTTLED';
+  }
+
+  const errors = today?.errors || 0;
+  const calls = today?.calls || 0;
+  const errClass = errors > 0 ? 'err' : 'muted';
+  const avgLat = today?.avg_latency ? fmtMs(today.avg_latency) : '—';
+
+  return `
+    <article class="provider-card status-${statusClass}">
+      <header class="pc-header">
+        <span class="pc-name">${escapeHTML(name)}</span>
+        <span class="badge badge-${statusClass}">${statusText}</span>
+      </header>
+      <div class="pc-model" title="${escapeHTML(s.model)}">${escapeHTML(s.model)}</div>
+      <div class="pc-bars">
+        ${barRow('RPM', s.rpm_used, s.rpm_limit, rpmPct)}
+        ${barRow('RPD', s.rpd_used, s.rpd_limit, rpdPct)}
+        ${barRow('TPM', s.tpm_used, s.tpm_limit, tpmPct)}
+      </div>
+      ${s.backoff_remaining > 0 ? `<p class="pc-backoff">${escapeHTML(s.backoff_reason)}</p>` : ''}
+      <footer class="pc-footer">
+        <span><strong>${calls}</strong> calls · <span class="${errClass}">${errors} err</span></span>
+        <span class="muted small">${avgLat} avg · ${fmtAgo(s.last_call)}</span>
+      </footer>
+    </article>
+  `;
+}
+
+function barRow(label, used, limit, pct) {
+  const cls = pct >= 90 ? 'bar-err' : pct >= 70 ? 'bar-warn' : 'bar-ok';
+  return `
+    <div class="pc-bar-row">
+      <span class="pc-bar-label">${label}</span>
+      <span class="pc-bar"><span class="pc-bar-fill ${cls}" style="width:${pct.toFixed(0)}%"></span></span>
+      <span class="pc-bar-val">${fmtNum(used)}/${fmtNum(limit)}</span>
+    </div>
+  `;
+}
+
+// ---- log row ----
+function logRow(c) {
+  const statusBadge = c.status === 'ok'
+    ? '<span class="badge badge-ok">ok</span>'
+    : '<span class="badge badge-err">error</span>';
+  const errCell = c.status === 'error'
+    ? `<span class="error-text" title="${escapeHTML(c.error)}">${escapeHTML((c.error || '').slice(0, 80))}</span>`
+    : (c.attempted ? `<span class="muted small">${escapeHTML(c.attempted.slice(0, 80))}</span>` : '—');
+  return `
+    <tr class="log-row status-${c.status}">
+      <td class="time">${fmtTime(c.ts)}</td>
+      <td class="prov">${escapeHTML(c.provider)}</td>
+      <td class="model muted small">${escapeHTML(c.model)}</td>
+      <td>${statusBadge}</td>
+      <td class="num">${fmtMs(c.latency_ms)}</td>
+      <td class="num">${fmtNum(c.input_tokens)}</td>
+      <td class="num">${fmtNum(c.output_tokens)}</td>
+      <td>${errCell}</td>
+    </tr>
+  `;
+}
+
+// ---- refresh ----
+async function refreshAll() {
+  try {
+    const [statusResp, callsResp] = await Promise.all([
+      fetch('/v1/status').then(r => r.json()),
+      fetchCalls(),
+    ]);
+    renderStatus(statusResp);
+    renderLogs(callsResp);
+  } catch (e) {
+    console.error('refresh failed', e);
+  }
+}
+
+async function fetchCalls() {
+  const params = new URLSearchParams();
+  const prov = document.getElementById('filter-provider').value;
+  const stat = document.getElementById('filter-status').value;
+  const lim = document.getElementById('filter-limit').value;
+  if (prov) params.set('provider', prov);
+  if (stat) params.set('status', stat);
+  if (lim) params.set('limit', lim);
+  return fetch(`/v1/calls?${params}`).then(r => r.json());
+}
+
+function renderStatus(d) {
+  document.getElementById('order-line').textContent = `Failover order: ${d.order.join(' → ')}`;
+
+  // KPIs
+  let totalCalls = 0, totalErrors = 0, totalTokens = 0, latSum = 0, latN = 0;
+  for (const t of Object.values(d.today)) {
+    totalCalls += t.calls || 0;
+    totalErrors += t.errors || 0;
+    totalTokens += (t.in_tok || 0) + (t.out_tok || 0);
+    if (t.avg_latency) { latSum += t.avg_latency * (t.calls || 1); latN += (t.calls || 1); }
+  }
+  document.getElementById('kpi-total').textContent = totalCalls;
+  document.getElementById('kpi-errors').innerHTML = totalErrors > 0
+    ? `<span class="err">${totalErrors}</span>` : '0';
+  document.getElementById('kpi-tokens').textContent = fmtNum(totalTokens);
+  document.getElementById('kpi-latency').textContent = latN ? fmtMs(latSum / latN) : '—';
+  document.getElementById('kpi-providers').textContent = Object.keys(d.live).length;
+
+  // Cards (ordered by failover order)
+  const grid = document.getElementById('provider-grid');
+  grid.innerHTML = d.order
+    .map(name => providerCard(name, d.live[name], d.today[name]))
+    .join('');
+
+  // Populate filter dropdown (once)
+  const filt = document.getElementById('filter-provider');
+  if (filt.children.length === 1) {
+    for (const name of d.order) {
+      const opt = document.createElement('option');
+      opt.value = name; opt.textContent = name;
+      filt.appendChild(opt);
+    }
+  }
+}
+
+function renderLogs(calls) {
+  const tbody = document.getElementById('log-tbody');
+  if (!calls.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted">No calls yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = calls.map(logRow).join('');
+}
+
+// ---- controls ----
+const toggleBtn = document.getElementById('refresh-toggle');
+toggleBtn.addEventListener('click', () => {
+  refreshActive = !refreshActive;
+  toggleBtn.dataset.active = String(refreshActive);
+  toggleBtn.textContent = refreshActive ? '⏸ Pause' : '▶ Resume';
+  if (refreshActive) {
+    refreshAll();
+    refreshTimer = setInterval(refreshAll, REFRESH_MS);
+  } else if (refreshTimer) {
+    clearInterval(refreshTimer);
+  }
+});
+document.getElementById('refresh-now').addEventListener('click', refreshAll);
+for (const id of ['filter-provider', 'filter-status', 'filter-limit']) {
+  document.getElementById(id).addEventListener('change', refreshAll);
+}
+
+refreshAll();
+refreshTimer = setInterval(refreshAll, REFRESH_MS);
+</script>
+
+{% endblock %}

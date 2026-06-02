@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block title %}Praxis — Learn anything{% endblock %}
+{% block content %}
+
+<section class="hero">
+  <h1>What do you want to learn?</h1>
+  <p class="sub">Tell Praxis a goal. It builds a day-by-day plan, quizzes you each day,
+  tracks what you actually know, and adapts.</p>
+
+  <form id="goal-form" class="goal-form">
+    <label>
+      <span>Learning goal</span>
+      <textarea name="text" rows="3" required minlength="8"
+                placeholder="e.g. Understand the transformer architecture well enough to implement one from scratch"></textarea>
+    </label>
+    <div class="row">
+      <label>
+        <span>Current level</span>
+        <select name="level">
+          <option value="beginner">Beginner</option>
+          <option value="intermediate" selected>Intermediate</option>
+          <option value="advanced">Advanced</option>
+        </select>
+      </label>
+      <label>
+        <span>Deadline (days)</span>
+        <input type="number" name="deadline_days" min="1" max="90" value="7" required>
+      </label>
+      <label>
+        <span>Model</span>
+        <select name="provider">
+          <option value="auto" {% if planner_default == 'auto' %}selected{% endif %}>Auto (failover order)</option>
+          {% for p in providers %}
+            <option value="{{ p }}" {% if p == planner_default %}selected{% endif %}>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <button type="submit" class="primary" id="generate-btn">Generate plan →</button>
+  </form>
+
+  <div id="thinking-panel" class="thinking-panel" hidden>
+    <div class="thinking-header">
+      <span class="dot"></span>
+      <strong id="thinking-status">Thinking…</strong>
+      <span class="muted small" id="thinking-meta"></span>
+    </div>
+    <pre id="thinking-stream" class="thinking-stream"></pre>
+  </div>
+</section>
+
+{% if goals %}
+<section class="past">
+  <h2>Past goals</h2>
+  <ul class="goal-list">
+    {% for g in goals %}
+      <li>
+        <a href="/goals/{{ g.id }}">
+          <span class="goal-text">{{ g.text }}</span>
+          <span class="muted small">{{ g.level }} · {{ g.deadline_days }} days · {{ g.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+        </a>
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<script>
+const form = document.getElementById('goal-form');
+const panel = document.getElementById('thinking-panel');
+const stream = document.getElementById('thinking-stream');
+const status = document.getElementById('thinking-status');
+const meta = document.getElementById('thinking-meta');
+const btn = document.getElementById('generate-btn');
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(form);
+  const provider = fd.get('provider');
+  const body = {
+    text: fd.get('text'),
+    level: fd.get('level'),
+    deadline_days: parseInt(fd.get('deadline_days'), 10),
+    provider: provider === 'auto' ? null : provider,
+  };
+
+  btn.disabled = true;
+  btn.textContent = 'Generating…';
+  panel.hidden = false;
+  stream.textContent = '';
+  status.textContent = 'Thinking…';
+  meta.textContent = `model: ${provider}`;
+
+  try {
+    const resp = await fetch('/api/goals/stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let charCount = 0;
+    const t0 = performance.now();
+
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+      const lines = buf.split('\n');
+      buf = lines.pop();  // last partial line stays in buffer
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const ev = JSON.parse(line.slice(6));
+        if (ev.type === 'start') {
+          meta.textContent = `goal #${ev.goal_id} · model: ${ev.provider}`;
+        } else if (ev.type === 'token') {
+          stream.textContent += ev.content;
+          charCount += ev.content.length;
+          stream.scrollTop = stream.scrollHeight;
+          const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+          status.textContent = `Streaming… (${charCount} chars · ${elapsed}s)`;
+        } else if (ev.type === 'done') {
+          status.textContent = `✓ Plan ready — redirecting…`;
+          setTimeout(() => { window.location = `/goals/${ev.goal_id}`; }, 400);
+          return;
+        } else if (ev.type === 'error') {
+          status.textContent = `✗ Error`;
+          stream.textContent += `\n\n[ERROR] ${ev.message}`;
+          btn.disabled = false;
+          btn.textContent = 'Generate plan →';
+          return;
+        }
+      }
+    }
+  } catch (err) {
+    status.textContent = '✗ Failed';
+    stream.textContent += `\n\n${err.message}`;
+    btn.disabled = false;
+    btn.textContent = 'Generate plan →';
+  }
+});
+</script>
+
+{% endblock %}

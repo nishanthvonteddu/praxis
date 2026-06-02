@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% block title %}{{ goal.text[:60] }} — Praxis{% endblock %}
+{% block content %}
+
+<section class="plan-page">
+  <a href="/" class="muted small">← All goals</a>
+  <h1>{{ goal.text }}</h1>
+  <p class="muted">{{ goal.level }} · {{ goal.deadline_days }} days · started {{ goal.created_at.strftime('%Y-%m-%d') }}{% if plan %} · plan v{{ plan.version }}{% endif %}</p>
+
+  {% if plan %}
+    <blockquote class="summary">{{ plan.summary }}</blockquote>
+
+    <!-- Refine chat: continue the conversation to modify the plan -->
+    <section class="refine">
+      <details>
+        <summary>💬 Refine this plan</summary>
+        <form id="refine-form" class="refine-form">
+          <textarea name="instruction" rows="2" required minlength="4"
+                    placeholder="e.g. Make day 3 shorter and add more on the chain rule. Or: I already know calculus, skip day 1."></textarea>
+          <div class="row">
+            <select name="provider" id="refine-provider">
+              <option value="auto">Auto</option>
+              <!-- populated by JS from /api/providers -->
+            </select>
+            <button type="submit" class="primary" id="refine-btn">Refine →</button>
+          </div>
+        </form>
+        <div id="refine-panel" class="thinking-panel" hidden>
+          <div class="thinking-header">
+            <span class="dot"></span>
+            <strong id="refine-status">Refining…</strong>
+            <span class="muted small" id="refine-meta"></span>
+          </div>
+          <pre id="refine-stream" class="thinking-stream"></pre>
+        </div>
+      </details>
+    </section>
+
+    {% if plan.caveats %}
+      <div class="caveat-box">
+        <strong>⚠ Caveats from the planner:</strong>
+        <ul>{% for c in plan.caveats %}<li>{{ c }}</li>{% endfor %}</ul>
+      </div>
+    {% endif %}
+
+    {% if plan.reasoning or plan.self_check or plan.reasoning_types %}
+      <details class="thinking">
+        <summary>🧠 How the planner thought about this</summary>
+        {% if plan.reasoning_types %}
+          <p class="muted small">
+            Reasoning types used:
+            {% for t in plan.reasoning_types %}<span class="tag">{{ t }}</span>{% endfor %}
+          </p>
+        {% endif %}
+        {% if plan.reasoning %}
+          <p><strong>Reasoning:</strong> {{ plan.reasoning }}</p>
+        {% endif %}
+        {% if plan.self_check %}
+          <p><strong>Self-check:</strong> {{ plan.self_check }}</p>
+        {% endif %}
+      </details>
+    {% endif %}
+
+    <h2>Plan</h2>
+    <ol class="day-grid">
+      {% for d in days %}
+        <li class="day day-{{ d.status }}">
+          <a href="/days/{{ d.id }}">
+            <header>
+              <span class="day-num">Day {{ d.day_num }}</span>
+              <span class="day-topic">{{ d.topic }}</span>
+              <span class="day-status">{{ d.status }}</span>
+            </header>
+            <p class="day-objective">{{ d.objective }}</p>
+            <ul class="concepts">
+              {% for c in d.concepts %}<li>{{ c }}</li>{% endfor %}
+            </ul>
+          </a>
+        </li>
+      {% endfor %}
+    </ol>
+
+    {% if mastery %}
+    <h2>Mastery</h2>
+    <ul class="mastery-list">
+      {% for m in mastery %}
+        <li>
+          <span class="concept">{{ m.concept }}</span>
+          <span class="bar"><span class="fill" style="width: {{ (m.score * 100) | round(0) }}%"></span></span>
+          <span class="score">{{ '%.2f' | format(m.score) }}</span>
+          <span class="samples muted small">n={{ m.samples }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  {% else %}
+    <p>No active plan. <a href="/">Create one →</a></p>
+  {% endif %}
+</section>
+
+<script>
+// Populate refine provider dropdown
+(async () => {
+  try {
+    const r = await fetch('/api/providers');
+    if (!r.ok) return;
+    const d = await r.json();
+    const sel = document.getElementById('refine-provider');
+    if (!sel) return;
+    for (const p of d.providers) {
+      const o = document.createElement('option');
+      o.value = p;
+      o.textContent = p;
+      if (p === d.planner_default) o.selected = true;
+      sel.appendChild(o);
+    }
+  } catch (e) {}
+})();
+
+const refineForm = document.getElementById('refine-form');
+if (refineForm) {
+  refineForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(refineForm);
+    const provider = fd.get('provider');
+    const body = {
+      instruction: fd.get('instruction'),
+      provider: provider === 'auto' ? null : provider,
+    };
+
+    const panel = document.getElementById('refine-panel');
+    const stream = document.getElementById('refine-stream');
+    const status = document.getElementById('refine-status');
+    const meta = document.getElementById('refine-meta');
+    const btn = document.getElementById('refine-btn');
+    btn.disabled = true;
+    btn.textContent = 'Refining…';
+    panel.hidden = false;
+    stream.textContent = '';
+    status.textContent = 'Thinking…';
+    meta.textContent = `model: ${provider}`;
+
+    try {
+      const resp = await fetch(`/api/goals/{{ goal.id }}/refine/stream`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let chars = 0;
+      const t0 = performance.now();
+
+      while (true) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, {stream: true});
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const ev = JSON.parse(line.slice(6));
+          if (ev.type === 'token') {
+            stream.textContent += ev.content;
+            chars += ev.content.length;
+            stream.scrollTop = stream.scrollHeight;
+            const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+            status.textContent = `Streaming… (${chars} chars · ${elapsed}s)`;
+          } else if (ev.type === 'done') {
+            status.textContent = `✓ Plan refined (v${ev.plan_id}) — reloading…`;
+            setTimeout(() => location.reload(), 400);
+            return;
+          } else if (ev.type === 'error') {
+            status.textContent = `✗ Error`;
+            stream.textContent += `\n\n[ERROR] ${ev.message}`;
+            btn.disabled = false;
+            btn.textContent = 'Refine →';
+            return;
+          }
+        }
+      }
+    } catch (err) {
+      status.textContent = '✗ Failed';
+      stream.textContent += `\n\n${err.message}`;
+      btn.disabled = false;
+      btn.textContent = 'Refine →';
+    }
+  });
+}
+</script>
+
+{% endblock %}
