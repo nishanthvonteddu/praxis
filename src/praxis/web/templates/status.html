@@ -5,12 +5,14 @@
 <section class="gateway-page">
   <header class="page-header">
     <div>
+      <p class="eyebrow">Operations</p>
       <h1>Gateway</h1>
-      <p class="muted">Live status of the multi-provider LLM router. Auto-refreshes every 3 s.</p>
+      <p class="muted">Provider health, capacity, and every model call in one live view.</p>
     </div>
     <div class="page-actions">
-      <button id="refresh-toggle" class="ghost-btn" data-active="true">⏸ Pause</button>
-      <button id="refresh-now" class="ghost-btn">↻ Refresh now</button>
+      <span class="live-indicator"><span></span>Live · <time id="last-refresh">connecting</time></span>
+      <button id="refresh-toggle" class="ghost-btn" data-active="true">Pause</button>
+      <button id="refresh-now" class="secondary-btn">Refresh now</button>
     </div>
   </header>
 
@@ -24,15 +26,17 @@
   </div>
 
   <!-- Provider cards -->
-  <h2>Providers</h2>
-  <p class="muted small" id="order-line"></p>
+  <header class="section-heading">
+    <div><p class="eyebrow">Routing pool</p><h2>Providers</h2></div>
+    <p class="muted small" id="order-line"></p>
+  </header>
   <div id="provider-grid" class="provider-grid">
     <p class="muted">Loading…</p>
   </div>
 
   <!-- Log viewer -->
   <header class="logs-header">
-    <h2>Recent calls</h2>
+    <div><p class="eyebrow">Telemetry</p><h2>Recent calls</h2></div>
     <div class="log-filters">
       <select id="filter-provider">
         <option value="">All providers</option>
@@ -41,6 +45,7 @@
         <option value="">All statuses</option>
         <option value="ok">Success</option>
         <option value="error">Errors only</option>
+        <option value="running">Running only</option>
       </select>
       <select id="filter-limit">
         <option value="50">50 rows</option>
@@ -123,6 +128,7 @@ function providerCard(name, s, today) {
   }
 
   const errors = today?.errors || 0;
+  const running = today?.running || 0;
   const calls = today?.calls || 0;
   const errClass = errors > 0 ? 'err' : 'muted';
   const avgLat = today?.avg_latency ? fmtMs(today.avg_latency) : '—';
@@ -141,7 +147,7 @@ function providerCard(name, s, today) {
       </div>
       ${s.backoff_remaining > 0 ? `<p class="pc-backoff">${escapeHTML(s.backoff_reason)}</p>` : ''}
       <footer class="pc-footer">
-        <span><strong>${calls}</strong> calls · <span class="${errClass}">${errors} err</span></span>
+        <span><strong>${calls}</strong> calls · <span class="${errClass}">${errors} err</span>${running ? ` · <span class="warn">${running} live</span>` : ''}</span>
         <span class="muted small">${avgLat} avg · ${fmtAgo(s.last_call)}</span>
       </footer>
     </article>
@@ -162,8 +168,10 @@ function barRow(label, used, limit, pct) {
 // ---- log row ----
 function logRow(c) {
   const statusBadge = c.status === 'ok'
-    ? '<span class="badge badge-ok">ok</span>'
-    : '<span class="badge badge-err">error</span>';
+    ? '<span class="badge badge-ok">complete</span>'
+    : c.status === 'running'
+      ? '<span class="badge badge-warn"><span class="mini-pulse"></span>running</span>'
+      : '<span class="badge badge-err">error</span>';
   const errCell = c.status === 'error'
     ? `<span class="error-text" title="${escapeHTML(c.error)}">${escapeHTML((c.error || '').slice(0, 80))}</span>`
     : (c.attempted ? `<span class="muted small">${escapeHTML(c.attempted.slice(0, 80))}</span>` : '—');
@@ -185,13 +193,15 @@ function logRow(c) {
 async function refreshAll() {
   try {
     const [statusResp, callsResp] = await Promise.all([
-      fetch('/v1/status').then(r => r.json()),
+      fetch(`/v1/status?t=${Date.now()}`, {cache: 'no-store'}).then(r => r.json()),
       fetchCalls(),
     ]);
     renderStatus(statusResp);
     renderLogs(callsResp);
+    document.getElementById('last-refresh').textContent = 'updated now';
   } catch (e) {
     console.error('refresh failed', e);
+    document.getElementById('last-refresh').textContent = 'refresh failed';
   }
 }
 
@@ -203,7 +213,8 @@ async function fetchCalls() {
   if (prov) params.set('provider', prov);
   if (stat) params.set('status', stat);
   if (lim) params.set('limit', lim);
-  return fetch(`/v1/calls?${params}`).then(r => r.json());
+  params.set('_t', Date.now());
+  return fetch(`/v1/calls?${params}`, {cache: 'no-store'}).then(r => r.json());
 }
 
 function renderStatus(d) {
@@ -222,7 +233,7 @@ function renderStatus(d) {
     ? `<span class="err">${totalErrors}</span>` : '0';
   document.getElementById('kpi-tokens').textContent = fmtNum(totalTokens);
   document.getElementById('kpi-latency').textContent = latN ? fmtMs(latSum / latN) : '—';
-  document.getElementById('kpi-providers').textContent = Object.keys(d.live).length;
+  document.getElementById('kpi-providers').textContent = Object.values(d.live).filter(p => p.backoff_remaining <= 0).length;
 
   // Cards (ordered by failover order)
   const grid = document.getElementById('provider-grid');
@@ -255,7 +266,7 @@ const toggleBtn = document.getElementById('refresh-toggle');
 toggleBtn.addEventListener('click', () => {
   refreshActive = !refreshActive;
   toggleBtn.dataset.active = String(refreshActive);
-  toggleBtn.textContent = refreshActive ? '⏸ Pause' : '▶ Resume';
+  toggleBtn.textContent = refreshActive ? 'Pause' : 'Resume';
   if (refreshActive) {
     refreshAll();
     refreshTimer = setInterval(refreshAll, REFRESH_MS);
