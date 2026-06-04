@@ -5,18 +5,24 @@ Two response styles per route:
   - HTML fragment when `HX-Request: true` is set (HTMX swaps it in)
 """
 import json
+import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from praxis.learning import agents, db
+from praxis.learning.search import search_many
 from praxis.learning.models import (
     CheckInAnswer,
     CheckInPlan,
     CheckInResult,
     CreateGoalRequest,
+    FeynmanExchange,
+    FeynmanReplyRequest,
+    FeynmanResult,
     Plan,
     RefinePlanRequest,
+    StartFeynmanRequest,
     SubmitAnswerRequest,
 )
 
@@ -28,6 +34,11 @@ router = APIRouter(prefix="/api")
 # Single-user app — process-local is fine.
 _active_checkins: dict[int, CheckInPlan] = {}
 _active_answers: dict[int, list[CheckInAnswer]] = {}
+
+# In-process Feynman sessions, keyed by an opaque token returned from /feynman/start.
+# value: {goal_id, concept, level, exchanges: list[FeynmanExchange], pending_question, turns}
+_feynman_sessions: dict[str, dict] = {}
+MAX_FEYNMAN_TURNS = 6
 
 
 # ---------- Goals & Plans ----------
@@ -276,3 +287,146 @@ async def latest_result(plan_day_id: int):
     if not result:
         raise HTTPException(404, "no completed check-in yet")
     return result.model_dump(mode="json")
+
+
+# ---------- Feynman checks (Mode 2) ----------
+
+def _feynman_opening(concept: str) -> str:
+    return (
+        f"In your own words, explain **{concept}** as if you were teaching it to a curious "
+        f"friend who has never heard of it. Cover not just what it is, but how and why it works."
+    )
+
+
+@router.post("/feynman/start")
+async def feynman_start(req: StartFeynmanRequest):
+    """Open a Feynman session for one concept. Returns a session token + the opening question."""
+    goal = db.get_goal(req.goal_id)
+    if not goal:
+        raise HTTPException(404, "goal not found")
+
+    token = uuid.uuid4().hex
+    question = _feynman_opening(req.concept)
+    _feynman_sessions[token] = {
+        "goal_id": req.goal_id,
+        "concept": req.concept,
+        "level": goal.level,
+        "exchanges": [],
+        "pending_question": question,
+        "turns": 0,
+    }
+    return {"session": token, "concept": req.concept, "question": question}
+
+
+@router.post("/feynman/reply")
+async def feynman_reply(req: FeynmanReplyRequest):
+    """Submit one explanation. The tutor evaluates and either probes again or marks it solid."""
+    state = _feynman_sessions.get(req.session)
+    if not state:
+        raise HTTPException(400, "no active Feynman session — call /feynman/start first")
+
+    try:
+        turn = await agents.feynman_turn(
+            concept=state["concept"],
+            level=state["level"],
+            exchanges=state["exchanges"],
+            current_question=state["pending_question"],
+            current_answer=req.answer_text,
+        )
+    except Exception as e:
+        raise HTTPException(502, f"feynman tutor failed: {e}")
+
+    state["exchanges"].append(
+        FeynmanExchange(question=state["pending_question"], answer=req.answer_text, turn=turn)
+    )
+    state["turns"] += 1
+
+    hit_cap = state["turns"] >= MAX_FEYNMAN_TURNS
+    done = turn.verdict == "solid" or hit_cap
+
+    if not done:
+        # Probe again. Fall back to a generic nudge if the model left follow_up empty.
+        next_q = turn.follow_up.strip() or (
+            f"Can you go one level deeper on the part you're least sure about in {state['concept']}?"
+        )
+        state["pending_question"] = next_q
+        return {
+            "turn": turn.model_dump(mode="json"),
+            "done": False,
+            "question": next_q,
+            "turns": state["turns"],
+            "max_turns": MAX_FEYNMAN_TURNS,
+        }
+
+    # Session complete — persist, update mastery, drop in-process state.
+    result = FeynmanResult(
+        goal_id=state["goal_id"],
+        concept=state["concept"],
+        exchanges=state["exchanges"],
+        final_understanding=turn.understanding,
+        solved=turn.verdict == "solid",
+    )
+    db.save_feynman(state["goal_id"], result)
+    db.update_mastery(state["goal_id"], state["concept"], turn.understanding)
+    _feynman_sessions.pop(req.session, None)
+    return {
+        "turn": turn.model_dump(mode="json"),
+        "done": True,
+        "result": result.model_dump(mode="json"),
+        "turns": state["turns"],
+        "max_turns": MAX_FEYNMAN_TURNS,
+    }
+
+
+@router.get("/goals/{goal_id}/feynman/latest")
+async def feynman_latest(goal_id: int, concept: str):
+    """Most recent completed Feynman session for a concept (query param `concept`)."""
+    result = db.latest_feynman(goal_id, concept)
+    if not result:
+        raise HTTPException(404, "no completed Feynman session for this concept yet")
+    return result.model_dump(mode="json")
+
+
+# ---------- Resource verification (web-search tool) ----------
+
+@router.post("/days/{plan_day_id}/resources/verify")
+async def verify_day_resources(plan_day_id: int):
+    """Run a real web search for this day's suggested resources, then have the verifier
+    agent confirm which exist and attach real URLs. Saves and returns the result."""
+    day = db.get_plan_day(plan_day_id)
+    if not day:
+        raise HTTPException(404, "plan day not found")
+
+    # Build search queries: each suggested resource, plus a topic-level fallback.
+    suggested = day.suggested_resources or []
+    queries = [s for s in suggested][:6]
+    if not queries:
+        queries = [f"{day.topic} {c}" for c in day.concepts[:3]] or [day.topic]
+    # Always add one authoritative topic query to surface resources the planner missed.
+    queries.append(f"best resource to learn {day.topic}")
+
+    try:
+        hits_by_query = await search_many(queries, per_query=4)
+    except Exception as e:
+        raise HTTPException(502, f"web search failed: {e}")
+
+    try:
+        check = await agents.verify_resources(
+            topic=day.topic,
+            concepts=day.concepts,
+            suggested=suggested,
+            hits_by_query=hits_by_query,
+        )
+    except Exception as e:
+        raise HTTPException(502, f"resource verifier failed: {e}")
+
+    db.save_resources(plan_day_id, check)
+    return check.model_dump(mode="json")
+
+
+@router.get("/days/{plan_day_id}/resources")
+async def get_day_resources(plan_day_id: int):
+    check = db.get_resources(plan_day_id)
+    if not check:
+        raise HTTPException(404, "no verified resources yet for this day")
+    return check.model_dump(mode="json")

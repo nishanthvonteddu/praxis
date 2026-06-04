@@ -12,7 +12,12 @@
 
   <h3>Concepts</h3>
   <ul class="concepts">
-    {% for c in day.concepts %}<li>{{ c }}</li>{% endfor %}
+    {% for c in day.concepts %}
+      <li>{{ c }}
+        <a class="explain-link" href="/goals/{{ goal.id }}/feynman?concept={{ c | urlencode }}"
+           title="Explain this concept (Feynman mode)">🧠 Explain</a>
+      </li>
+    {% endfor %}
   </ul>
 
   {% if day.activities %}
@@ -23,11 +28,38 @@
   {% endif %}
 
   {% if day.suggested_resources %}
-    <h3>Suggested resources</h3>
+    <h3>Suggested resources <span class="muted small">(planner suggestions — not yet verified)</span></h3>
     <ul>
       {% for r in day.suggested_resources %}<li>{{ r }}</li>{% endfor %}
     </ul>
   {% endif %}
+
+  <h3>Verified resources <span class="muted small">(real links, checked via web search)</span></h3>
+  <button class="primary" id="verify-btn">🔎 Find &amp; verify real resources</button>
+  <div id="verify-loading" class="muted" hidden>Searching the web and verifying links…</div>
+  <div id="resources-out">
+    {% if resources %}
+      <ul class="resource-list">
+        {% for r in resources.resources %}
+          <li class="resource {{ 'verified' if r.verified else 'unverified' }}">
+            {% if r.url %}<a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.name }}</a>
+            {% else %}<span>{{ r.name }}</span>{% endif %}
+            {% if r.kind %}<span class="tag">{{ r.kind }}</span>{% endif %}
+            {% if r.verified %}<span class="conf conf-high">verified ✓</span>
+            {% else %}<span class="conf conf-low">unverified</span>{% endif %}
+            {% if r.note %}<p class="muted small">{{ r.note }}</p>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+      {% if resources.reasoning or resources.self_check %}
+        <details class="thinking nested">
+          <summary>🧠 Verifier's thinking</summary>
+          {% if resources.reasoning %}<p><strong>Reasoning:</strong> {{ resources.reasoning }}</p>{% endif %}
+          {% if resources.self_check %}<p><strong>Self-check:</strong> {{ resources.self_check }}</p>{% endif %}
+        </details>
+      {% endif %}
+    {% endif %}
+  </div>
 
   <hr>
 
@@ -175,6 +207,44 @@ function renderGrade(data) {
 function nextQuestion() {
   activeIndex++;
   document.getElementById('checkin').innerHTML = questionHTML(activeIndex);
+}
+
+// ----- Verified resources (web-search tool) -----
+function renderResources(data) {
+  const items = (data.resources || []).map(r => {
+    const name = r.url
+      ? `<a href="${r.url}" target="_blank" rel="noopener">${escapeHTML(r.name)}</a>`
+      : `<span>${escapeHTML(r.name)}</span>`;
+    const kind = r.kind ? `<span class="tag">${escapeHTML(r.kind)}</span>` : '';
+    const badge = r.verified
+      ? `<span class="conf conf-high">verified ✓</span>`
+      : `<span class="conf conf-low">unverified</span>`;
+    const note = r.note ? `<p class="muted small">${escapeHTML(r.note)}</p>` : '';
+    return `<li class="resource ${r.verified ? 'verified' : 'unverified'}">${name} ${kind} ${badge}${note}</li>`;
+  }).join('');
+  return `<ul class="resource-list">${items}</ul>` +
+    thinkingHTML("Verifier's thinking", data.reasoning, data.self_check);
+}
+
+const verifyBtn = document.getElementById('verify-btn');
+if (verifyBtn) {
+  verifyBtn.addEventListener('click', async () => {
+    const loading = document.getElementById('verify-loading');
+    const out = document.getElementById('resources-out');
+    verifyBtn.disabled = true;
+    loading.hidden = false;
+    try {
+      const r = await fetch(`/api/days/${PLAN_DAY_ID}/resources/verify`, {method: 'POST'});
+      if (!r.ok) throw new Error(await r.text());
+      out.innerHTML = renderResources(await r.json());
+    } catch (err) {
+      out.innerHTML = `<p class="error">${escapeHTML(err.message)}</p>`;
+    } finally {
+      loading.hidden = true;
+      verifyBtn.disabled = false;
+      verifyBtn.textContent = '🔎 Re-run verification';
+    }
+  });
 }
 </script>
 

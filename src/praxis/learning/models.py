@@ -126,6 +126,96 @@ class CheckInResult(BaseModel):
     )
 
 
+# ---------- Feynman checks (Mode 2) ----------
+
+FeynmanVerdict = Literal["probe", "solid"]
+
+
+class FeynmanTurn(BaseModel):
+    """The tutor's evaluation of one learner explanation, plus its next move."""
+    reasoning: str = Field(
+        description="What the explanation got right, what's missing, vague, or wrong — "
+                    "matched against a mental rubric for the concept. 2-4 sentences."
+    )
+    self_check: str = Field(
+        description="Verification: is the verdict consistent with the gaps you found? "
+                    "Did you judge real understanding rather than vocabulary? Is follow_up "
+                    "non-empty iff verdict='probe'?"
+    )
+    understanding: float = Field(
+        ge=0.0, le=1.0,
+        description="How solid the explanation is so far. 0=no grasp, 0.5=partial, "
+                    "1=could teach it cleanly.",
+    )
+    gaps: list[str] = Field(
+        default_factory=list,
+        description="Specific things missing, muddled, or wrong in the explanation.",
+    )
+    verdict: FeynmanVerdict = Field(
+        description="'solid' when the explanation is complete and correct; "
+                    "'probe' when one more follow-up is warranted.",
+    )
+    follow_up: str = Field(
+        default="",
+        description="The next question to ask, targeting the SINGLE biggest gap. "
+                    "Required (non-empty) when verdict='probe'; empty when 'solid'.",
+    )
+    feedback: str = Field(description="Short, encouraging note to the learner (1-2 sentences).")
+
+
+class FeynmanExchange(BaseModel):
+    """One round of a Feynman session: question asked, learner's explanation, tutor's eval."""
+    question: str
+    answer: str
+    turn: FeynmanTurn
+
+
+class FeynmanResult(BaseModel):
+    """A completed Feynman session for one concept."""
+    goal_id: int
+    concept: str
+    exchanges: list[FeynmanExchange]
+    final_understanding: float = Field(ge=0.0, le=1.0)
+    solved: bool = Field(description="True if the learner reached a 'solid' verdict (vs. hit the turn cap).")
+
+
+# ---------- Resource verification (web-search tool) ----------
+
+class SearchHit(BaseModel):
+    """One result from the web-search tool."""
+    title: str
+    url: str
+    snippet: str = ""
+
+
+class VerifiedResource(BaseModel):
+    """A learning resource the verifier checked against real search results."""
+    name: str = Field(description="Human-readable resource name/title")
+    url: str = Field(
+        default="",
+        description="A real URL taken from the provided search results. Empty if none matched.",
+    )
+    kind: str = Field(
+        default="",
+        description="Type tag: 'video', 'article', 'paper', 'course', 'docs', 'book', etc.",
+    )
+    verified: bool = Field(description="True ONLY if a real matching URL from the search results is attached.")
+    note: str = Field(default="", description="Why verified/unverified, or what the resource covers (1 sentence).")
+
+
+class ResourceCheck(BaseModel):
+    """Output of the resource-verifier agent for one plan day."""
+    reasoning: str = Field(
+        description="How you matched the planner's suggested resources to real search hits; "
+                    "which you could and couldn't verify, and why. 2-4 sentences."
+    )
+    self_check: str = Field(
+        description="Verification: every non-empty `url` comes from the provided search results "
+                    "(NOT invented); `verified` is true iff a real URL is attached."
+    )
+    resources: list[VerifiedResource] = Field(default_factory=list)
+
+
 # ---------- API request models ----------
 
 class CreateGoalRequest(BaseModel):
@@ -145,6 +235,16 @@ class RefinePlanRequest(BaseModel):
 
 class SubmitAnswerRequest(BaseModel):
     question_index: int = Field(ge=0)
+    answer_text: str = Field(min_length=1)
+
+
+class StartFeynmanRequest(BaseModel):
+    goal_id: int
+    concept: str = Field(min_length=1, max_length=200)
+
+
+class FeynmanReplyRequest(BaseModel):
+    session: str = Field(min_length=1, description="Session token returned by /feynman/start")
     answer_text: str = Field(min_length=1)
 
 

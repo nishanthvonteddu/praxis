@@ -70,9 +70,22 @@ async def view_day(request: Request, plan_day_id: int):
     goal_id = plan_row["goal_id"]
     goal = db.get_goal(goal_id)
     latest = db.latest_check_in(plan_day_id)
+    resources = db.get_resources(plan_day_id)
     return templates.TemplateResponse(
         request, "day.html",
-        {"day": day, "goal": goal, "latest": latest},
+        {"day": day, "goal": goal, "latest": latest, "resources": resources},
+    )
+
+
+@router.get("/goals/{goal_id}/feynman", response_class=HTMLResponse)
+async def feynman_page(request: Request, goal_id: int, concept: str):
+    goal = db.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(404, "goal not found")
+    latest = db.latest_feynman(goal_id, concept)
+    return templates.TemplateResponse(
+        request, "feynman.html",
+        {"goal": goal, "concept": concept, "latest": latest},
     )
 
 

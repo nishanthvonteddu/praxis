@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     planner_provider: str = "gemini"
     checkin_provider: str = "groq"
     grader_provider: str = "groq"
+    feynman_provider: str = "groq"
+    verifier_provider: str = "groq"
 
     praxis_port: int = 8099
 

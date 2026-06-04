@@ -44,6 +44,8 @@ Every LLM call goes through a **local gateway** that rotates across providers tr
 
 - **Day-by-day curriculum generation**, streamed live as the agent reasons.
 - **Daily check-ins** — 1 Feynman + 2 quiz questions targeted at your weakest concepts.
+- **Feynman mode** — explain a concept in your own words; a tutor finds the gaps and asks Socratic follow-ups until your explanation is solid, then updates mastery.
+- **Verified resources** — a built-in web-search tool finds *real* links for each day and a verifier agent confirms which exist, so suggestions aren't hallucinated.
 - **Calibrated LLM grading** with feedback, confidence, and named knowledge gaps.
 - **Per-concept mastery tracking** via a recency-biased EMA.
 - **Plan refinement** with full versioning.
@@ -63,7 +65,8 @@ Every LLM call goes through a **local gateway** that rotates across providers tr
 │  Browser  (HTMX + Jinja, no SPA build step)                      │
 │  /              goal entry · streams thinking · redirects on done │
 │  /goals/{id}    plan view · refine chat · mastery                 │
-│  /days/{id}     check-in flow (question → grade → next)           │
+│  /goals/{id}/feynman  explain-a-concept loop (Feynman mode)       │
+│  /days/{id}     check-in flow · verify real resources             │
 │  /status        live gateway dashboard                            │
 └────────────────────────────┬─────────────────────────────────────┘
                              │ HTTP (JSON or SSE)
@@ -73,7 +76,9 @@ Every LLM call goes through a **local gateway** that rotates across providers tr
 │  • Planner agent      (pinned: Gemini)                            │
 │  • Check-in agent     (pinned: Groq)                              │
 │  • Grader agent       (pinned: Groq)                              │
-│  • learning.db ← goals, plans, plan_days, mastery, check_ins      │
+│  • Feynman tutor      (pinned: Groq)                              │
+│  • Resource verifier  (pinned: Groq) ← web-search tool           │
+│  • learning.db ← goals, plans, mastery, check_ins, feynman, resources │
 └────────────────────────────┬─────────────────────────────────────┘
                              │ HTTP (gateway's OpenAI-compat shim)
                              ▼
@@ -184,6 +189,8 @@ Set in `.env` (see `.env.example`):
 | `PLANNER_PROVIDER` | `gemini` | Provider the planner prefers. |
 | `CHECKIN_PROVIDER` | `groq` | Provider the check-in agent prefers. |
 | `GRADER_PROVIDER` | `groq` | Provider the grader prefers. |
+| `FEYNMAN_PROVIDER` | `groq` | Provider the Feynman tutor prefers. |
+| `VERIFIER_PROVIDER` | `groq` | Provider the resource verifier prefers. |
 | `PRAXIS_PORT` | `8099` | Server port. |
 
 ---
@@ -210,6 +217,10 @@ Point any OpenAI-compatible client (Cursor, Continue, LangChain, the OpenAI SDK)
 | `POST` | `/api/days/{id}/checkin/start` | Generate today's question set. |
 | `POST` | `/api/days/{id}/checkin/answer` | Submit + grade one answer; updates mastery. |
 | `GET` | `/api/days/{id}/checkin/latest` | Latest completed check-in result. |
+| `POST` | `/api/feynman/start` · `/api/feynman/reply` | Open a Feynman session for a concept; submit explanations turn-by-turn. |
+| `GET` | `/api/goals/{id}/feynman/latest?concept=` | Latest completed Feynman session for a concept. |
+| `POST` | `/api/days/{id}/resources/verify` | Web-search + verify this day's resources; attaches real URLs. |
+| `GET` | `/api/days/{id}/resources` | Latest verified resources for a day. |
 
 ---
 
@@ -234,10 +245,11 @@ praxis/
     │   └── db.py                   # gateway.db schema + ops
     │
     ├── learning/               # ─── agentic learning loop
-    │   ├── models.py               # Plan, PlanDay, Question, GradedAnswer, ...
-    │   ├── agents.py               # Pydantic AI agents + streaming helpers
+    │   ├── models.py               # Plan, PlanDay, Question, GradedAnswer, FeynmanTurn, ResourceCheck, ...
+    │   ├── agents.py               # Pydantic AI agents (planner, check-in, grader, feynman, verifier)
+    │   ├── search.py               # keyless web-search tool (DuckDuckGo) for resource verification
     │   ├── db.py                   # learning.db schema + ops
-    │   └── routes.py               # /api/goals (+ /stream + /refine), /api/days/*
+    │   └── routes.py               # /api/goals, /api/days/*, /api/feynman/*, /api/.../resources
     │
     └── web/                    # ─── server-rendered UI
         ├── routes.py               # /, /goals/{id}, /days/{id}, /status
@@ -253,7 +265,9 @@ praxis/
 
 **"Show your work" as a hard constraint.** Every agent output schema includes `reasoning` and `self_check` fields the model cannot skip. This forces real reasoning over fluent confidence and gives you a UI trail to debug outputs.
 
-**Three agents, three providers.** Different jobs → different prompts, schemas, and pinned models: Planner → Gemini (long context, once per goal); Check-in → Groq (fast); Grader → Groq (fast, called per answer).
+**Many agents, right-sized providers.** Different jobs → different prompts, schemas, and pinned models: Planner → Gemini (long context, once per goal); Check-in, Grader, Feynman tutor, and resource verifier → Groq (fast, called interactively).
+
+**Reasoning is separated from verification.** The planner is told never to invent URLs — but a prompt rule can't *check* anything. So real verification is a tool, not a vibe: a web-search step fetches actual links and a verifier agent confirms each suggested resource against them, attaching only real URLs and flagging the rest. The model reasons; the tool checks.
 
 **Mastery as a recency-biased EMA.** `new = 0.6·old + 0.4·sample`. Improvement shows up fast and a single early mistake doesn't haunt you, while repeated results converge on the truth.
 
@@ -268,12 +282,14 @@ Praxis is designed to host **five learning modes** over one shared substrate (co
 | # | Mode | What it does | Status |
 |---|---|---|---|
 | 1 | **Curriculum agent** | Day-by-day plan + daily check-in + replanning | ✅ Shipped |
-| 2 | **Feynman checks** | You explain a concept; the agent finds gaps and asks follow-ups until your explanation is solid | 🔜 Planned |
+| 2 | **Feynman checks** | You explain a concept; the agent finds gaps and asks follow-ups until your explanation is solid | ✅ Shipped |
 | 3 | **Spaced-repetition flashcards** | Extract facts from notes, write cards, schedule reviews (FSRS), fuzzy-grade recall | 🔜 Planned |
 | 4 | **Adaptive quiz** | Targets weak spots; harder when you're solid, easier when you struggle | 🔜 Planned |
 | 5 | **Socratic explainer** | Teaches by asking questions that lead you to the answer | 🔜 Planned |
 
-**Also planned:** web search and file ingestion via MCP (real, verified resources), automatic re-planning when mastery drifts, a cross-mode concept graph, and multi-user support.
+**Also shipped:** a built-in **web-search tool** + **resource-verifier agent** so suggested resources are confirmed against real links (closes the planner's "don't invent URLs" gap). The search tool is keyless (DuckDuckGo HTML) and cleanly isolated, so it can later be swapped for an MCP search server.
+
+**Still planned:** file ingestion via MCP, automatic re-planning when mastery drifts, a cross-mode concept graph, and multi-user support.
 
 ---
 

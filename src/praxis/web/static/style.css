@@ -261,7 +261,7 @@ button.ghost-btn[data-active="false"] { color: var(--muted); }
 /* mastery */
 .mastery-list { list-style: none; padding: 0; }
 .mastery-list li {
-  display: grid; grid-template-columns: 1fr 2fr 60px 70px;
+  display: grid; grid-template-columns: 1fr 2fr 60px 70px auto;
   gap: 1rem; align-items: center;
   padding: .55rem 0;
   border-bottom: 1px solid var(--border);
@@ -536,3 +536,25 @@ button.ghost-btn[data-active="false"] { color: var(--muted); }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   vertical-align: bottom;
 }
+
+/* ----- Feynman mode + verified resources ----- */
+.explain-link {
+  font-size: .8rem; white-space: nowrap;
+  padding: .15rem .5rem; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); color: var(--accent);
+}
+.explain-link:hover { border-color: var(--accent); background: var(--surface-2); }
+
+.concepts li .explain-link { margin-left: .5rem; }
+
+.feynman-page .sub { color: var(--text-dim); max-width: 60ch; }
+
+.resource-list { list-style: none; padding: 0; }
+.resource {
+  padding: .6rem .8rem; margin: .4rem 0;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.resource.verified { border-left: 3px solid var(--ok); }
+.resource.unverified { border-left: 3px solid var(--muted); opacity: .85; }
+.resource p { margin: .3rem 0 0; }

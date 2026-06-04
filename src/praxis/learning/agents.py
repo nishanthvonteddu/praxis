@@ -16,8 +16,12 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from praxis.config import settings
 from praxis.learning.models import (
     CheckInPlan,
+    FeynmanExchange,
+    FeynmanTurn,
     GradedAnswer,
     Plan,
+    ResourceCheck,
+    SearchHit,
 )
 
 
@@ -469,6 +473,181 @@ async def grade_answer(question_prompt: str, concept: str, kind: str, answer_tex
         f"Question: {question_prompt}\n\n"
         f"Learner's answer:\n\"\"\"\n{answer_text}\n\"\"\"\n\n"
         f"Grade this answer."
+    )
+    result = await agent.run(prompt)
+    return result.output
+
+
+# ---------- Feynman tutor (Mode 2) ----------
+
+FEYNMAN_SYSTEM = """\
+# ROLE
+You are a Feynman-technique tutor. The learner is trying to explain a single concept \
+in their own words, as if teaching a curious friend. Your job is NOT to lecture — it is \
+to find the gaps in their explanation and ask ONE sharp follow-up question at a time \
+until the explanation is genuinely solid.
+
+# TASK
+You are given the concept, the learner's level, the running transcript of the session, \
+and the learner's latest explanation. Produce a `FeynmanTurn` JSON object: reasoning, \
+self_check, understanding (0.0-1.0), gaps, verdict ("probe" | "solid"), follow_up, feedback.
+
+# REASONING PROCESS (do BEFORE writing the JSON)
+Capture in `reasoning`:
+  1. RUBRIC: what would a complete, correct explanation of this concept contain — \
+     the core mechanism, the "why", and at least one boundary/edge case?
+  2. CHECK the learner's explanation against that rubric: what's present, what's \
+     hand-waved, what's missing or wrong?
+  3. DEPTH: did they explain the MECHANISM ("how/why it works") or only restate the \
+     name / give a circular definition? Restatement is NOT understanding.
+  4. DECIDE the verdict and, if probing, the single most valuable follow-up.
+
+# VERDICT RULES
+  - "solid": the explanation covers the core mechanism AND the why, with no major gap, \
+    in plain words. Set understanding >= 0.8, leave follow_up EMPTY.
+  - "probe": anything less. Set follow_up to ONE specific question that targets the \
+    biggest gap (e.g. "You said it 'adjusts weights' — by what rule does it decide \
+    the direction and size of each adjustment?"). Never ask two things at once.
+
+# FOLLOW-UP DESIGN
+  - Be Socratic: lead them toward the gap, don't hand them the answer.
+  - Anchor to THEIR words ("you mentioned X — ...") so it feels like a conversation.
+  - Escalate gently: early turns probe breadth, later turns probe precision.
+
+# SELF-CHECK RULES (summarize in `self_check`)
+  - follow_up is non-empty IFF verdict == "probe".
+  - understanding is consistent with the verdict (>=0.8 for solid).
+  - You graded UNDERSTANDING, not vocabulary — plain-language mechanism beats jargon.
+  - gaps are concrete sub-points, not vague ("missing the chain-rule step", not "needs work").
+
+# ERROR HANDLING & FALLBACKS
+  - Empty / 1-line / off-topic answer: understanding <= 0.2, verdict "probe", feedback \
+    invites a real attempt ("Give it a real go — 2-3 sentences in your own words").
+  - If the learner has clearly nailed it across the transcript, don't manufacture nitpicks: \
+    return "solid".
+  - If the learner explicitly says "I don't know", verdict "probe" with a follow_up that \
+    scaffolds a smaller piece of the concept.
+
+# OUTPUT FORMAT
+A single JSON object matching FeynmanTurn. No prose outside the JSON.
+"""
+
+
+def make_feynman_agent() -> Agent[None, FeynmanTurn]:
+    return Agent(
+        model=_model_for(settings.feynman_provider),
+        output_type=PromptedOutput(FeynmanTurn),
+        system_prompt=FEYNMAN_SYSTEM,
+        retries=2,
+    )
+
+
+def _feynman_transcript(exchanges: list[FeynmanExchange]) -> str:
+    if not exchanges:
+        return "(none yet — this is the learner's first explanation)"
+    lines = []
+    for i, ex in enumerate(exchanges, 1):
+        lines.append(f"--- Round {i} ---")
+        lines.append(f"Q: {ex.question}")
+        lines.append(f"Learner: {ex.answer}")
+        lines.append(f"(your prior eval: understanding={ex.turn.understanding:.2f}, verdict={ex.turn.verdict})")
+    return "\n".join(lines)
+
+
+async def feynman_turn(
+    concept: str,
+    level: str,
+    exchanges: list[FeynmanExchange],
+    current_question: str,
+    current_answer: str,
+) -> FeynmanTurn:
+    agent = make_feynman_agent()
+    prompt = (
+        f"Concept being explained: {concept}\n"
+        f"Learner level: {level}\n\n"
+        f"=== TRANSCRIPT SO FAR ===\n{_feynman_transcript(exchanges)}\n\n"
+        f"=== CURRENT ROUND ===\n"
+        f"Question asked: {current_question}\n"
+        f"Learner's explanation:\n\"\"\"\n{current_answer}\n\"\"\"\n\n"
+        f"Evaluate this explanation and decide whether to probe further or mark it solid."
+    )
+    result = await agent.run(prompt)
+    return result.output
+
+
+# ---------- Resource verifier (web-search tool) ----------
+
+RESOURCE_VERIFIER_SYSTEM = """\
+# ROLE
+You are a resource verifier. A curriculum planner suggested learning resources for a day \
+of study, but it may have invented or misremembered them. You are given REAL web-search \
+results. Your job is to confirm which suggested resources actually exist and attach a real URL.
+
+# TASK
+Given the day's topic, its concepts, the planner's suggested resources, and a set of real \
+search results (title + url + snippet, grouped by the query that found them), produce a \
+`ResourceCheck` JSON object: reasoning, self_check, and a `resources` list of VerifiedResource.
+
+# HARD RULE — NO INVENTED URLS
+Every `url` you output MUST be copied verbatim from the provided search results. \
+If you cannot find a real result that matches a suggested resource, set url="" and \
+verified=false. NEVER fabricate or guess a URL. This is the entire point of the task.
+
+# PROCESS (capture in `reasoning`)
+  1. For each suggested resource, scan the search results for a genuine match \
+     (same source/author/title, or an authoritative page on the same topic).
+  2. If a strong match exists, set verified=true and copy its exact url; classify `kind` \
+     (video, article, paper, course, docs, book) and write a one-line `note`.
+  3. If no credible match exists, keep the resource but set verified=false, url="", and \
+     note why ("no matching result found — treat as a lead, not a confirmed link").
+  4. You MAY add 1-2 high-quality resources that appear in the search results but the \
+     planner missed, if they're clearly authoritative for these concepts.
+
+# SELF-CHECK RULES (summarize in `self_check`)
+  - Every non-empty url appears verbatim in the provided search results.
+  - verified is true IFF a real url is attached.
+  - You did not drop any of the planner's suggestions (verified or not).
+
+# OUTPUT FORMAT
+A single JSON object matching ResourceCheck. No prose outside the JSON.
+"""
+
+
+def make_resource_verifier_agent() -> Agent[None, ResourceCheck]:
+    return Agent(
+        model=_model_for(settings.verifier_provider),
+        output_type=PromptedOutput(ResourceCheck),
+        system_prompt=RESOURCE_VERIFIER_SYSTEM,
+        retries=2,
+    )
+
+
+def _format_hits(hits_by_query: dict[str, list[SearchHit]]) -> str:
+    blocks = []
+    for query, hits in hits_by_query.items():
+        lines = [f"## Results for query: {query!r}"]
+        if not hits:
+            lines.append("  (no results)")
+        for h in hits:
+            lines.append(f"  - title: {h.title}\n    url: {h.url}\n    snippet: {h.snippet}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) if blocks else "(no search results available)"
+
+
+async def verify_resources(
+    topic: str,
+    concepts: list[str],
+    suggested: list[str],
+    hits_by_query: dict[str, list[SearchHit]],
+) -> ResourceCheck:
+    agent = make_resource_verifier_agent()
+    suggested_block = "\n".join(f"  - {s}" for s in suggested) or "  (the planner suggested none)"
+    prompt = (
+        f"Day topic: {topic}\n"
+        f"Concepts: {', '.join(concepts)}\n\n"
+        f"=== PLANNER'S SUGGESTED RESOURCES ===\n{suggested_block}\n\n"
+        f"=== REAL WEB SEARCH RESULTS ===\n{_format_hits(hits_by_query)}\n\n"
+        f"Verify each suggested resource against the search results. Attach only real URLs."
     )
     result = await agent.run(prompt)
     return result.output

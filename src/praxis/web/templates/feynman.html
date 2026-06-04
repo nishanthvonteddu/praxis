@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Feynman · {{ concept }} — Praxis{% endblock %}
+{% block content %}
+
+<section class="feynman-page">
+  <a href="/goals/{{ goal.id }}" class="muted small">← Back to plan</a>
+  <h1>🧠 Explain it: <em>{{ concept }}</em></h1>
+  <p class="sub">Teach this concept in your own words. The tutor finds the gaps and keeps
+  asking until your explanation is solid — then it updates your mastery score.</p>
+
+  {% if latest %}
+    <details class="past-answer">
+      <summary>Last session — final understanding
+        {{ '%.0f' | format(latest.final_understanding * 100) }}%
+        {% if latest.solved %}<span class="conf conf-high">solid ✓</span>{% else %}<span class="conf conf-low">incomplete</span>{% endif %}
+      </summary>
+      {% for ex in latest.exchanges %}
+        <p><strong>Q:</strong> {{ ex.question }}</p>
+        <p><strong>You:</strong> {{ ex.answer }}</p>
+        <p class="muted small">→ understanding {{ '%.2f' | format(ex.turn.understanding) }} · {{ ex.turn.verdict }}</p>
+      {% endfor %}
+    </details>
+  {% endif %}
+
+  <div id="feynman"></div>
+  <button class="primary" id="start-btn">Start explaining →</button>
+</section>
+
+<script>
+const GOAL_ID = {{ goal.id }};
+const CONCEPT = {{ concept | tojson }};
+let SESSION = null;
+
+function escapeHTML(s) {
+  return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function thinkingHTML(reasoning, selfCheck) {
+  if (!reasoning && !selfCheck) return '';
+  return `
+    <details class="thinking nested">
+      <summary>🧠 Tutor's thinking</summary>
+      ${reasoning ? `<p><strong>Reasoning:</strong> ${escapeHTML(reasoning)}</p>` : ''}
+      ${selfCheck ? `<p><strong>Self-check:</strong> ${escapeHTML(selfCheck)}</p>` : ''}
+    </details>`;
+}
+
+function questionCard(question, turns, maxTurns) {
+  const counter = turns != null ? `<p class="q-meta"><strong>Round ${turns + 1}/${maxTurns}</strong></p>` : '';
+  return `
+    <div class="question-card">
+      ${counter}
+      <p class="q-prompt">${escapeHTML(question)}</p>
+      <textarea id="feynman-input" rows="6" placeholder="Explain in your own words..."></textarea>
+      <button class="primary" id="reply-btn" onclick="sendReply()">Submit explanation</button>
+    </div>
+    <div id="turn-out"></div>`;
+}
+
+function turnCard(turn) {
+  const gaps = (turn.gaps && turn.gaps.length)
+    ? `<p><strong>Gaps:</strong> ${escapeHTML(turn.gaps.join(', '))}</p>` : '';
+  const cls = turn.verdict === 'solid' ? 'ok' : 'partial';
+  return `
+    <div class="grade-card ${cls}">
+      <p><strong>Understanding: ${(turn.understanding * 100).toFixed(0)}%</strong>
+         <span class="conf conf-${turn.verdict === 'solid' ? 'high' : 'medium'}">${turn.verdict}</span></p>
+      <p>${escapeHTML(turn.feedback)}</p>
+      ${gaps}
+      ${thinkingHTML(turn.reasoning, turn.self_check)}
+    </div>`;
+}
+
+document.getElementById('start-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('start-btn');
+  btn.disabled = true; btn.textContent = 'Starting…';
+  try {
+    const r = await fetch('/api/feynman/start', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({goal_id: GOAL_ID, concept: CONCEPT}),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    SESSION = d.session;
+    btn.style.display = 'none';
+    document.getElementById('feynman').innerHTML = questionCard(d.question, 0, 6);
+  } catch (err) {
+    btn.disabled = false; btn.textContent = 'Start explaining →';
+    document.getElementById('feynman').innerHTML = `<p class="error">${escapeHTML(err.message)}</p>`;
+  }
+});
+
+async function sendReply() {
+  const input = document.getElementById('feynman-input');
+  const txt = input.value.trim();
+  if (!txt) return;
+  const replyBtn = document.getElementById('reply-btn');
+  replyBtn.disabled = true; replyBtn.textContent = 'Thinking…';
+  const out = document.getElementById('turn-out');
+  out.innerHTML = '<p class="muted">Tutor is reviewing your explanation…</p>';
+  try {
+    const r = await fetch('/api/feynman/reply', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session: SESSION, answer_text: txt}),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    let html = turnCard(d.turn);
+    if (d.done) {
+      const r2 = d.result;
+      html += `<div class="summary-card">
+        <h3>${r2.solved ? '✓ Explanation is solid' : 'Session ended'}</h3>
+        <p>Final understanding: <strong>${(r2.final_understanding * 100).toFixed(0)}%</strong> ·
+           mastery for "${escapeHTML(CONCEPT)}" updated.</p>
+        <a href="/goals/${GOAL_ID}">Back to plan →</a>
+      </div>`;
+      document.getElementById('feynman').innerHTML = html;
+    } else {
+      out.innerHTML = html;
+      document.getElementById('feynman').insertAdjacentHTML(
+        'beforeend', questionCard(d.question, d.turns, d.max_turns));
+      const inputs = document.querySelectorAll('#feynman-input');
+      inputs[inputs.length - 1].focus();
+    }
+  } catch (err) {
+    replyBtn.disabled = false; replyBtn.textContent = 'Submit explanation';
+    out.innerHTML = `<p class="error">${escapeHTML(err.message)}</p>`;
+  }
+}
+</script>
+
+{% endblock %}

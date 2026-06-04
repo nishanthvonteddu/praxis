@@ -89,6 +89,8 @@
           <span class="bar"><span class="fill" style="width: {{ (m.score * 100) | round(0) }}%"></span></span>
           <span class="score">{{ '%.2f' | format(m.score) }}</span>
           <span class="samples muted small">n={{ m.samples }}</span>
+          <a class="explain-link" href="/goals/{{ goal.id }}/feynman?concept={{ m.concept | urlencode }}"
+             title="Explain this concept (Feynman mode)">🧠 Explain</a>
         </li>
       {% endfor %}
     </ul>

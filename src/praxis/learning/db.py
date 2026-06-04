@@ -8,11 +8,13 @@ from pathlib import Path
 
 from praxis.learning.models import (
     CheckInResult,
+    FeynmanResult,
     GoalRow,
     Plan,
     PlanDayRow,
     PlanRow,
     MasteryRow,
+    ResourceCheck,
 )
 
 
@@ -86,6 +88,23 @@ def init() -> None:
                 completed_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_check_ins_day ON check_ins(plan_day_id, completed_at DESC);
+
+            CREATE TABLE IF NOT EXISTS feynman_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+                concept TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                final_understanding REAL NOT NULL,
+                completed_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_feynman_goal
+                ON feynman_sessions(goal_id, concept, completed_at DESC);
+
+            CREATE TABLE IF NOT EXISTS resources (
+                plan_day_id INTEGER PRIMARY KEY REFERENCES plan_days(id) ON DELETE CASCADE,
+                check_json TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
         """)
 
 
@@ -298,3 +317,59 @@ def latest_check_in(plan_day_id: int) -> CheckInResult | None:
     if not r:
         return None
     return CheckInResult.model_validate_json(r["result_json"])
+
+
+def goal_id_for_plan_day(plan_day_id: int) -> int | None:
+    """Resolve the owning goal_id for a plan day (plan_day → plan → goal)."""
+    with conn() as c:
+        r = c.execute(
+            """SELECT p.goal_id AS goal_id
+               FROM plan_days d JOIN plans p ON p.id = d.plan_id
+               WHERE d.id = ?""",
+            (plan_day_id,),
+        ).fetchone()
+    return r["goal_id"] if r else None
+
+
+# ---------- Feynman sessions ----------
+
+def save_feynman(goal_id: int, result: FeynmanResult) -> int:
+    with conn() as c:
+        cur = c.execute(
+            """INSERT INTO feynman_sessions (goal_id, concept, result_json, final_understanding, completed_at)
+               VALUES (?,?,?,?,?)""",
+            (goal_id, result.concept, result.model_dump_json(), result.final_understanding, time.time()),
+        )
+        return cur.lastrowid
+
+
+def latest_feynman(goal_id: int, concept: str) -> FeynmanResult | None:
+    with conn() as c:
+        r = c.execute(
+            """SELECT result_json FROM feynman_sessions
+               WHERE goal_id=? AND concept=? ORDER BY completed_at DESC LIMIT 1""",
+            (goal_id, concept),
+        ).fetchone()
+    if not r:
+        return None
+    return FeynmanResult.model_validate_json(r["result_json"])
+
+
+# ---------- Verified resources ----------
+
+def save_resources(plan_day_id: int, check: ResourceCheck) -> None:
+    with conn() as c:
+        c.execute(
+            """INSERT INTO resources (plan_day_id, check_json, updated_at) VALUES (?,?,?)
+               ON CONFLICT(plan_day_id) DO UPDATE SET check_json=excluded.check_json,
+                                                      updated_at=excluded.updated_at""",
+            (plan_day_id, check.model_dump_json(), time.time()),
+        )
+
+
+def get_resources(plan_day_id: int) -> ResourceCheck | None:
+    with conn() as c:
+        r = c.execute("SELECT check_json FROM resources WHERE plan_day_id=?", (plan_day_id,)).fetchone()
+    if not r:
+        return None
+    return ResourceCheck.model_validate_json(r["check_json"])
