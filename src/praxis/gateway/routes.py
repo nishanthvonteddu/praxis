@@ -1,10 +1,11 @@
 """HTTP endpoints: native /v1/chat + OpenAI-compatible /v1/openai/chat/completions."""
+import asyncio
 import json
 import time
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from praxis.gateway import db
 from praxis.gateway.core import DispatchFailed, dispatch_chat
@@ -91,6 +92,7 @@ async def openai_chat(req: OAIChatRequest, request: Request):
         return StreamingResponse(
             _openai_stream(rt, messages, provider, model_override, req),
             media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"},
         )
 
     try:
@@ -140,9 +142,21 @@ async def _openai_stream(rt, messages, provider, model_override, req):
 
     p = rt.providers[name]
     rt.state[name].record()
+    prompt_chars = sum(len(m.get("content") or "") for m in messages)
+    input_tokens = max(0, est_tokens - (req.max_tokens or 2048))
+    selected_model = model_override or p.model
+    call_id = db.log_call(
+        provider=name,
+        model=selected_model,
+        input_tokens=input_tokens,
+        status="running",
+        prompt_chars=prompt_chars,
+        override=provider,
+        attempted="; ".join(f"{a['provider']}:{a['reason']}" for a in atts),
+    )
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
-    fingerprint = {"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": f"{name}/{p.model}"}
+    fingerprint = {"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": f"{name}/{selected_model}"}
     agg = []
     t0 = time.time()
 
@@ -157,25 +171,37 @@ async def _openai_stream(rt, messages, provider, model_override, req):
             payload = {**fingerprint, "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}]}
             yield f"data: {json.dumps(payload)}\n\n"
 
+        latency = int((time.time() - t0) * 1000)
+        text = "".join(agg)
+        output_tokens = len(text) // 4
+        rt.state[name].record_tokens(input_tokens + output_tokens)
+        db.update_call(
+            call_id,
+            status="ok",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency,
+            response_chars=len(text),
+        )
         done = {**fingerprint, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
         yield f"data: {json.dumps(done)}\n\n"
         yield "data: [DONE]\n\n"
-
-        latency = int((time.time() - t0) * 1000)
-        text = "".join(agg)
-        db.log_call(
-            provider=name, model=p.model,
-            input_tokens=est_tokens - (req.max_tokens or 2048),
-            output_tokens=len(text) // 4,
-            latency_ms=latency, status="ok",
-            prompt_chars=sum(len(m.get('content') or '') for m in messages),
-            response_chars=len(text),
-            attempted="",
+    except (GeneratorExit, asyncio.CancelledError):
+        db.update_call(
+            call_id,
+            status="error",
+            input_tokens=input_tokens,
+            error="stream disconnected before completion",
+            latency_ms=int((time.time() - t0) * 1000),
+            response_chars=sum(len(chunk) for chunk in agg),
         )
+        raise
     except Exception as e:
-        db.log_call(
-            provider=name, model=p.model,
-            status="error", error=str(e)[:500],
+        db.update_call(
+            call_id,
+            status="error",
+            input_tokens=input_tokens,
+            error=str(e)[:500],
             latency_ms=int((time.time() - t0) * 1000),
         )
         yield f"data: {json.dumps({'error': str(e)[:300]})}\n\n"
@@ -199,14 +225,18 @@ async def list_providers(request: Request):
 @router.get("/v1/status")
 async def status(request: Request):
     rt = request.app.state.router
-    return {
+    return JSONResponse({
         "order": rt.order,
         "live": rt.status(),
         "today": db.aggregate_today(),
         "limits": LIMITS,
-    }
+        "refreshed_at": time.time(),
+    }, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/v1/calls")
 async def calls(limit: int = 100, provider: str | None = None, status: str | None = None):
-    return db.recent(limit=limit, provider=provider, status=status)
+    return JSONResponse(
+        db.recent(limit=limit, provider=provider, status=status),
+        headers={"Cache-Control": "no-store"},
+    )
