@@ -8,13 +8,17 @@ from pathlib import Path
 
 from praxis.learning.models import (
     CheckInResult,
+    FlashcardDraft,
+    FlashcardRow,
     FeynmanResult,
     GoalRow,
+    NoteRow,
     Plan,
     PlanDayRow,
     PlanRow,
     MasteryRow,
     ResourceCheck,
+    UserRow,
 )
 
 
@@ -36,8 +40,15 @@ def conn():
 def init() -> None:
     with conn() as c:
         c.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS goals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
                 text TEXT NOT NULL,
                 level TEXT NOT NULL,
                 deadline_days INTEGER NOT NULL,
@@ -105,16 +116,143 @@ def init() -> None:
                 check_json TEXT NOT NULL,
                 updated_at REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS concept_edges (
+                goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                relation TEXT NOT NULL DEFAULT 'prerequisite',
+                PRIMARY KEY (goal_id, source, target)
+            );
+
+            CREATE TABLE IF NOT EXISTS flashcards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+                concept TEXT NOT NULL,
+                front TEXT NOT NULL,
+                back TEXT NOT NULL,
+                due_at REAL NOT NULL,
+                stability REAL NOT NULL DEFAULT 1.0,
+                difficulty REAL NOT NULL DEFAULT 5.0,
+                reps INTEGER NOT NULL DEFAULT 0,
+                lapses INTEGER NOT NULL DEFAULT 0,
+                last_reviewed REAL,
+                UNIQUE(goal_id, front)
+            );
+            CREATE INDEX IF NOT EXISTS idx_flashcards_due ON flashcards(goal_id, due_at);
+
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+                filename TEXT NOT NULL,
+                content TEXT NOT NULL,
+                concepts_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS socratic_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+                concept TEXT NOT NULL,
+                transcript_json TEXT NOT NULL,
+                understanding REAL NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS replan_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+                reason TEXT NOT NULL,
+                weak_concepts_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS roadmap_targets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                target_type TEXT NOT NULL DEFAULT 'checkpoint',
+                target_value REAL NOT NULL DEFAULT 1.0,
+                concept TEXT,
+                completed INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL
+            );
         """)
+        c.execute(
+            "INSERT OR IGNORE INTO users (id, name, created_at) VALUES (1, 'Local learner', ?)",
+            (time.time(),),
+        )
+        columns = {r["name"] for r in c.execute("PRAGMA table_info(goals)").fetchall()}
+        if "user_id" not in columns:
+            c.execute("ALTER TABLE goals ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        day_columns = {r["name"] for r in c.execute("PRAGMA table_info(plan_days)").fetchall()}
+        for name, definition in (
+            ("checkpoint", "TEXT NOT NULL DEFAULT ''"),
+            ("success_criteria_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("estimated_minutes", "INTEGER NOT NULL DEFAULT 60"),
+            ("difficulty", "TEXT NOT NULL DEFAULT 'core'"),
+        ):
+            if name not in day_columns:
+                c.execute(f"ALTER TABLE plan_days ADD COLUMN {name} {definition}")
+        c.execute(
+            """DELETE FROM flashcards
+               WHERE front LIKE 'What is %, in your own words?'
+                  OR front LIKE 'How would you apply %?'"""
+        )
+        plan_rows = c.execute("SELECT id, goal_id FROM plans WHERE is_active=1").fetchall()
+        for plan_row in plan_rows:
+            edge_count = c.execute(
+                "SELECT COUNT(*) AS n FROM concept_edges WHERE goal_id=?",
+                (plan_row["goal_id"],),
+            ).fetchone()["n"]
+            if edge_count:
+                continue
+            previous: list[str] = []
+            day_rows = c.execute(
+                "SELECT concepts_json FROM plan_days WHERE plan_id=? ORDER BY day_num",
+                (plan_row["id"],),
+            ).fetchall()
+            for day_row in day_rows:
+                current = json.loads(day_row["concepts_json"])
+                for target in current:
+                    for source in previous[-6:]:
+                        if source.lower() != target.lower():
+                            c.execute(
+                                """INSERT OR IGNORE INTO concept_edges
+                                   (goal_id, source, target, relation)
+                                   VALUES (?,?,?,'prerequisite')""",
+                                (plan_row["goal_id"], source, target),
+                            )
+                previous.extend(current)
 
 
 # ---------- Goals ----------
 
-def create_goal(text: str, level: str, deadline_days: int) -> int:
+def create_user(name: str) -> int:
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO goals (text, level, deadline_days, created_at) VALUES (?,?,?,?)",
-            (text, level, deadline_days, time.time()),
+            "INSERT INTO users (name, created_at) VALUES (?,?)",
+            (name.strip(), time.time()),
+        )
+        return cur.lastrowid
+
+
+def list_users() -> list[UserRow]:
+    with conn() as c:
+        rows = c.execute("SELECT * FROM users ORDER BY id").fetchall()
+    return [
+        UserRow(id=r["id"], name=r["name"], created_at=datetime.fromtimestamp(r["created_at"]))
+        for r in rows
+    ]
+
+
+def create_goal(text: str, level: str, deadline_days: int, user_id: int = 1) -> int:
+    with conn() as c:
+        cur = c.execute(
+            "INSERT INTO goals (user_id, text, level, deadline_days, created_at) VALUES (?,?,?,?,?)",
+            (user_id, text, level, deadline_days, time.time()),
         )
         return cur.lastrowid
 
@@ -125,7 +263,7 @@ def get_goal(goal_id: int) -> GoalRow | None:
     if not r:
         return None
     return GoalRow(
-        id=r["id"], text=r["text"], level=r["level"],
+        id=r["id"], user_id=r["user_id"], text=r["text"], level=r["level"],
         deadline_days=r["deadline_days"],
         created_at=datetime.fromtimestamp(r["created_at"]),
     )
@@ -138,12 +276,17 @@ def delete_goal(goal_id: int) -> bool:
         return cur.rowcount > 0
 
 
-def list_goals() -> list[GoalRow]:
+def list_goals(user_id: int | None = None) -> list[GoalRow]:
     with conn() as c:
-        rows = c.execute("SELECT * FROM goals ORDER BY created_at DESC").fetchall()
+        if user_id is None:
+            rows = c.execute("SELECT * FROM goals ORDER BY created_at DESC").fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM goals WHERE user_id=? ORDER BY created_at DESC", (user_id,),
+            ).fetchall()
     return [
         GoalRow(
-            id=r["id"], text=r["text"], level=r["level"],
+            id=r["id"], user_id=r["user_id"], text=r["text"], level=r["level"],
             deadline_days=r["deadline_days"],
             created_at=datetime.fromtimestamp(r["created_at"]),
         )
@@ -175,11 +318,13 @@ def save_plan(goal_id: int, plan: Plan) -> int:
         for d in plan.days:
             c.execute(
                 """INSERT INTO plan_days
-                   (plan_id, day_num, topic, objective, concepts_json, activities_json, resources_json)
-                   VALUES (?,?,?,?,?,?,?)""",
+                   (plan_id, day_num, topic, objective, concepts_json, activities_json,
+                    resources_json, checkpoint, success_criteria_json, estimated_minutes, difficulty)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (plan_id, d.day_num, d.topic, d.objective,
                  json.dumps(d.concepts), json.dumps(d.activities),
-                 json.dumps(d.suggested_resources)),
+                 json.dumps(d.suggested_resources), d.checkpoint,
+                 json.dumps(d.success_criteria), d.estimated_minutes, d.difficulty),
             )
         # Initialize mastery rows for each unique concept
         seen: set[str] = set()
@@ -194,6 +339,19 @@ def save_plan(goal_id: int, plan: Plan) -> int:
                        VALUES (?,?,0.0,0)""",
                     (goal_id, con),
                 )
+        c.execute("DELETE FROM concept_edges WHERE goal_id=?", (goal_id,))
+        previous: list[str] = []
+        for d in plan.days:
+            current = [x.strip() for x in d.concepts if x.strip()]
+            for target in current:
+                for source in previous[-6:]:
+                    if source.lower() != target.lower():
+                        c.execute(
+                            """INSERT OR IGNORE INTO concept_edges
+                               (goal_id, source, target, relation) VALUES (?,?,?,'prerequisite')""",
+                            (goal_id, source, target),
+                        )
+            previous.extend(current)
         return plan_id
 
 
@@ -246,6 +404,10 @@ def _row_to_plan_day(r) -> PlanDayRow:
         concepts=json.loads(r["concepts_json"]),
         activities=json.loads(r["activities_json"]),
         suggested_resources=json.loads(r["resources_json"]),
+        checkpoint=r["checkpoint"] or f"Create evidence that demonstrates: {r['objective']}",
+        success_criteria=json.loads(r["success_criteria_json"] or "[]"),
+        estimated_minutes=r["estimated_minutes"] or 60,
+        difficulty=r["difficulty"] or "core",
         status=r["status"],
     )
 
@@ -373,3 +535,334 @@ def get_resources(plan_day_id: int) -> ResourceCheck | None:
     if not r:
         return None
     return ResourceCheck.model_validate_json(r["check_json"])
+
+
+# ---------- Shared concept graph ----------
+
+def concept_graph(goal_id: int) -> dict:
+    plan = get_active_plan(goal_id)
+    if not plan:
+        return {"nodes": [], "edges": []}
+    days = get_plan_days(plan.id)
+    mastery = {m.concept.lower(): m for m in get_mastery(goal_id)}
+    day_map: dict[str, list[int]] = {}
+    names: dict[str, str] = {}
+    for day in days:
+        for concept in day.concepts:
+            key = concept.lower()
+            names[key] = concept
+            day_map.setdefault(key, []).append(day.day_num)
+    with conn() as c:
+        edges = [
+            dict(r) for r in c.execute(
+                "SELECT source, target, relation FROM concept_edges WHERE goal_id=?",
+                (goal_id,),
+            ).fetchall()
+        ]
+    prereqs: dict[str, list[str]] = {}
+    for edge in edges:
+        prereqs.setdefault(edge["target"].lower(), []).append(edge["source"])
+    nodes = []
+    for key, name in names.items():
+        m = mastery.get(key)
+        nodes.append({
+            "concept": name,
+            "mastery": m.score if m else 0.0,
+            "samples": m.samples if m else 0,
+            "day_nums": day_map[key],
+            "prerequisites": prereqs.get(key, []),
+        })
+    return {"nodes": nodes, "edges": edges}
+
+
+# ---------- Spaced repetition ----------
+
+def save_flashcards(goal_id: int, cards: list[FlashcardDraft]) -> int:
+    created = 0
+    with conn() as c:
+        for card in cards:
+            numeric_difficulty = {"foundation": 3.5, "application": 5.0, "analysis": 6.5}[card.difficulty]
+            cur = c.execute(
+                """INSERT OR IGNORE INTO flashcards
+                   (goal_id, concept, front, back, due_at, difficulty)
+                   VALUES (?,?,?,?,?,?)""",
+                (goal_id, card.concept, card.front, card.back, time.time(), numeric_difficulty),
+            )
+            created += cur.rowcount
+    return created
+
+
+def due_flashcards(goal_id: int, limit: int = 20) -> list[FlashcardRow]:
+    with conn() as c:
+        rows = c.execute(
+            """SELECT * FROM flashcards WHERE goal_id=? AND due_at<=?
+               ORDER BY due_at, difficulty DESC LIMIT ?""",
+            (goal_id, time.time(), limit),
+        ).fetchall()
+    return [_flashcard_row(r) for r in rows]
+
+
+def all_flashcards(goal_id: int) -> list[FlashcardRow]:
+    with conn() as c:
+        rows = c.execute(
+            "SELECT * FROM flashcards WHERE goal_id=? ORDER BY due_at", (goal_id,),
+        ).fetchall()
+    return [_flashcard_row(r) for r in rows]
+
+
+def _flashcard_row(r) -> FlashcardRow:
+    return FlashcardRow(
+        id=r["id"], goal_id=r["goal_id"], concept=r["concept"],
+        front=r["front"], back=r["back"],
+        due_at=datetime.fromtimestamp(r["due_at"]),
+        stability=r["stability"], difficulty=r["difficulty"],
+        reps=r["reps"], lapses=r["lapses"],
+    )
+
+
+def review_flashcard(card_id: int, rating: int) -> FlashcardRow | None:
+    with conn() as c:
+        r = c.execute("SELECT * FROM flashcards WHERE id=?", (card_id,)).fetchone()
+        if not r:
+            return None
+        stability = float(r["stability"])
+        difficulty = float(r["difficulty"])
+        reps = r["reps"] + 1
+        lapses = r["lapses"]
+        if rating == 1:
+            interval_days = 5 / 1440
+            stability = max(0.25, stability * 0.45)
+            difficulty = min(10.0, difficulty + 0.8)
+            lapses += 1
+        elif rating == 2:
+            interval_days = max(1.0, stability * 1.2)
+            stability *= 1.15
+            difficulty = min(10.0, difficulty + 0.2)
+        elif rating == 3:
+            interval_days = max(1.0, stability * 2.5)
+            stability *= 1.8
+            difficulty = max(1.0, difficulty - 0.15)
+        else:
+            interval_days = max(3.0, stability * 4.0)
+            stability *= 2.4
+            difficulty = max(1.0, difficulty - 0.5)
+        due_at = time.time() + interval_days * 86400
+        c.execute(
+            """UPDATE flashcards SET due_at=?, stability=?, difficulty=?, reps=?,
+               lapses=?, last_reviewed=? WHERE id=?""",
+            (due_at, stability, difficulty, reps, lapses, time.time(), card_id),
+        )
+        goal_id, concept = r["goal_id"], r["concept"]
+    update_mastery(goal_id, concept, {1: 0.15, 2: 0.45, 3: 0.75, 4: 0.95}[rating])
+    with conn() as c:
+        return _flashcard_row(c.execute("SELECT * FROM flashcards WHERE id=?", (card_id,)).fetchone())
+
+
+# ---------- Notes / ingestion ----------
+
+def save_note(goal_id: int, filename: str, content: str, concepts: list[str]) -> int:
+    with conn() as c:
+        cur = c.execute(
+            """INSERT INTO notes (goal_id, filename, content, concepts_json, created_at)
+               VALUES (?,?,?,?,?)""",
+            (goal_id, filename, content, json.dumps(concepts), time.time()),
+        )
+        for concept in concepts:
+            c.execute(
+                "INSERT OR IGNORE INTO mastery (goal_id, concept, score, samples) VALUES (?,?,0,0)",
+                (goal_id, concept),
+            )
+        return cur.lastrowid
+
+
+def list_notes(goal_id: int) -> list[NoteRow]:
+    with conn() as c:
+        rows = c.execute(
+            "SELECT * FROM notes WHERE goal_id=? ORDER BY created_at DESC", (goal_id,),
+        ).fetchall()
+    return [
+        NoteRow(
+            id=r["id"], goal_id=r["goal_id"], filename=r["filename"], content=r["content"],
+            concepts=json.loads(r["concepts_json"]), created_at=datetime.fromtimestamp(r["created_at"]),
+        )
+        for r in rows
+    ]
+
+
+# ---------- Automatic replanning ----------
+
+def maybe_auto_replan(goal_id: int) -> dict | None:
+    weak = [m.concept for m in get_mastery(goal_id) if m.samples >= 2 and m.score < 0.4]
+    if not weak:
+        return None
+    with conn() as c:
+        recent = c.execute(
+            "SELECT created_at FROM replan_events WHERE goal_id=? ORDER BY created_at DESC LIMIT 1",
+            (goal_id,),
+        ).fetchone()
+        if recent and time.time() - recent["created_at"] < 21600:
+            return None
+        plan = c.execute(
+            "SELECT id FROM plans WHERE goal_id=? AND is_active=1 ORDER BY version DESC LIMIT 1",
+            (goal_id,),
+        ).fetchone()
+        if not plan:
+            return None
+        day = c.execute(
+            """SELECT * FROM plan_days WHERE plan_id=? AND status!='done'
+               ORDER BY day_num LIMIT 1""",
+            (plan["id"],),
+        ).fetchone()
+        if not day:
+            return None
+        activities = json.loads(day["activities_json"])
+        activity = "Targeted review: revisit " + ", ".join(weak[:4]) + " before new material."
+        if activity not in activities:
+            activities.insert(0, activity)
+            c.execute(
+                "UPDATE plan_days SET activities_json=? WHERE id=?",
+                (json.dumps(activities), day["id"]),
+            )
+        c.execute(
+            """INSERT INTO replan_events (goal_id, reason, weak_concepts_json, created_at)
+               VALUES (?,?,?,?)""",
+            (goal_id, "mastery drift", json.dumps(weak[:8]), time.time()),
+        )
+    return {"plan_day_id": day["id"], "weak_concepts": weak[:8], "activity": activity}
+
+
+def replan_events(goal_id: int) -> list[dict]:
+    with conn() as c:
+        rows = c.execute(
+            "SELECT * FROM replan_events WHERE goal_id=? ORDER BY created_at DESC", (goal_id,),
+        ).fetchall()
+    return [
+        {
+            "id": r["id"], "reason": r["reason"],
+            "weak_concepts": json.loads(r["weak_concepts_json"]),
+            "created_at": datetime.fromtimestamp(r["created_at"]).isoformat(),
+        }
+        for r in rows
+    ]
+
+
+# ---------- Interactive roadmap ----------
+
+def roadmap(goal_id: int) -> dict:
+    plan = get_active_plan(goal_id)
+    if not plan:
+        return {"overall_progress": 0, "current_day": None, "checkpoints": [], "targets": []}
+    days = get_plan_days(plan.id)
+    mastery = {m.concept.lower(): m.score for m in get_mastery(goal_id)}
+    checkpoints = []
+    complete_count = 0
+    current_day = None
+    for day in days:
+        scores = [mastery.get(c.lower(), 0.0) for c in day.concepts]
+        current_mastery = sum(scores) / len(scores) if scores else 0.0
+        if day.status == "done":
+            progress = 1.0
+            complete_count += 1
+            state = "complete"
+        elif day.status == "in_progress":
+            progress = max(0.2, current_mastery)
+            state = "active"
+            current_day = current_day or day.day_num
+        else:
+            progress = min(0.75, current_mastery * 0.8)
+            state = "ready" if current_day is None and day.day_num == complete_count + 1 else "locked"
+            if state == "ready":
+                current_day = day.day_num
+        checkpoints.append({
+            "id": day.id,
+            "day_num": day.day_num,
+            "topic": day.topic,
+            "objective": day.objective,
+            "checkpoint": day.checkpoint or f"Demonstrate: {day.objective}",
+            "success_criteria": day.success_criteria or [
+                "Complete the planned artifact or demonstration.",
+                "Explain the key decisions without relying on notes.",
+            ],
+            "estimated_minutes": day.estimated_minutes,
+            "difficulty": day.difficulty,
+            "status": day.status,
+            "state": state,
+            "progress": round(progress, 3),
+            "current_mastery": round(current_mastery, 3),
+            "target_mastery": 0.8,
+            "concepts": day.concepts,
+        })
+    target_rows = list_roadmap_targets(goal_id)
+    target_progress = sum(1 for t in target_rows if t["completed"])
+    denominator = len(days) + len(target_rows)
+    overall = (complete_count + target_progress) / denominator if denominator else 0.0
+    return {
+        "overall_progress": round(overall, 3),
+        "current_day": current_day,
+        "checkpoints": checkpoints,
+        "targets": target_rows,
+    }
+
+
+def create_roadmap_target(
+    goal_id: int,
+    title: str,
+    description: str,
+    target_type: str,
+    target_value: float,
+    concept: str | None,
+) -> dict:
+    with conn() as c:
+        cur = c.execute(
+            """INSERT INTO roadmap_targets
+               (goal_id, title, description, target_type, target_value, concept, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (goal_id, title.strip(), description.strip(), target_type, target_value, concept, time.time()),
+        )
+        target_id = cur.lastrowid
+    return get_roadmap_target(target_id)
+
+
+def get_roadmap_target(target_id: int) -> dict | None:
+    with conn() as c:
+        row = c.execute("SELECT * FROM roadmap_targets WHERE id=?", (target_id,)).fetchone()
+    return _roadmap_target(row) if row else None
+
+
+def list_roadmap_targets(goal_id: int) -> list[dict]:
+    with conn() as c:
+        rows = c.execute(
+            "SELECT * FROM roadmap_targets WHERE goal_id=? ORDER BY completed, created_at",
+            (goal_id,),
+        ).fetchall()
+    return [_roadmap_target(row) for row in rows]
+
+
+def update_roadmap_target(target_id: int, completed: bool) -> dict | None:
+    with conn() as c:
+        cur = c.execute(
+            "UPDATE roadmap_targets SET completed=? WHERE id=?",
+            (int(completed), target_id),
+        )
+        if not cur.rowcount:
+            return None
+    return get_roadmap_target(target_id)
+
+
+def delete_roadmap_target(target_id: int) -> bool:
+    with conn() as c:
+        return c.execute("DELETE FROM roadmap_targets WHERE id=?", (target_id,)).rowcount > 0
+
+
+def _roadmap_target(row) -> dict:
+    return {
+        "id": row["id"],
+        "goal_id": row["goal_id"],
+        "title": row["title"],
+        "description": row["description"],
+        "target_type": row["target_type"],
+        "target_value": row["target_value"],
+        "concept": row["concept"],
+        "completed": bool(row["completed"]),
+        "created_at": datetime.fromtimestamp(row["created_at"]).isoformat(),
+    }

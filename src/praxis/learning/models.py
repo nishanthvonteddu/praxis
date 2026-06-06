@@ -29,6 +29,16 @@ class PlanDay(BaseModel):
         default_factory=list,
         description="Resource suggestions — names/types are fine, exact URLs not required",
     )
+    checkpoint: str = Field(
+        default="",
+        description="A concrete artifact or demonstration that proves the day's objective was met.",
+    )
+    success_criteria: list[str] = Field(
+        default_factory=list,
+        description="2-4 observable criteria used to evaluate the checkpoint.",
+    )
+    estimated_minutes: int = Field(default=60, ge=15, le=480)
+    difficulty: Literal["foundation", "core", "stretch", "synthesis"] = "core"
 
 
 class Plan(BaseModel):
@@ -67,6 +77,12 @@ class Question(BaseModel):
     kind: QuestionKind
     concept: str = Field(description="Which concept (must match one in today's PlanDay) this targets")
     prompt: str = Field(description="The exact question text shown to the learner")
+    difficulty: Literal["foundation", "application", "analysis"] = "application"
+    intent: str = Field(default="", description="The diagnostic purpose of this question.")
+    expected_elements: list[str] = Field(
+        default_factory=list,
+        description="Concrete elements a strong answer should contain.",
+    )
 
 
 class CheckInPlan(BaseModel):
@@ -222,6 +238,7 @@ class CreateGoalRequest(BaseModel):
     text: str = Field(min_length=8, max_length=500, description="Free-form learning goal")
     level: Level = "beginner"
     deadline_days: int = Field(ge=1, le=90)
+    user_id: int = Field(default=1, ge=1)
     provider: Optional[str] = Field(
         default=None,
         description="Provider override (e.g. 'gemini', 'groq', 'auto'). None = use PLANNER_PROVIDER env",
@@ -248,10 +265,112 @@ class FeynmanReplyRequest(BaseModel):
     answer_text: str = Field(min_length=1)
 
 
+# ---------- Remaining learning modes ----------
+
+class FlashcardRow(BaseModel):
+    id: int
+    goal_id: int
+    concept: str
+    front: str
+    back: str
+    due_at: datetime
+    stability: float = 1.0
+    difficulty: float = 5.0
+    reps: int = 0
+    lapses: int = 0
+
+
+class FlashcardDraft(BaseModel):
+    concept: str = Field(min_length=2, max_length=200)
+    front: str = Field(min_length=12, max_length=500)
+    back: str = Field(min_length=20, max_length=1500)
+    card_type: Literal["concept", "mechanism", "application", "contrast", "failure-mode"]
+    difficulty: Literal["foundation", "application", "analysis"] = "application"
+
+
+class FlashcardSet(BaseModel):
+    rationale: str = Field(min_length=20)
+    cards: list[FlashcardDraft] = Field(min_length=3, max_length=30)
+
+
+class ReviewFlashcardRequest(BaseModel):
+    rating: Literal[1, 2, 3, 4] = Field(
+        description="1=again, 2=hard, 3=good, 4=easy",
+    )
+
+
+class AdaptiveQuizRequest(BaseModel):
+    goal_id: int
+    count: int = Field(default=5, ge=1, le=12)
+
+
+class AdaptiveQuizAnswerRequest(BaseModel):
+    session: str
+    question_index: int = Field(ge=0)
+    answer_text: str = Field(min_length=1)
+
+
+class SocraticStartRequest(BaseModel):
+    goal_id: int
+    concept: str = Field(min_length=1, max_length=200)
+
+
+class SocraticReplyRequest(BaseModel):
+    session: str
+    answer_text: str = Field(min_length=1)
+
+
+class SocraticTurn(BaseModel):
+    feedback: str
+    question: str
+    understanding: float = Field(ge=0.0, le=1.0)
+    complete: bool = False
+
+
+class NoteRow(BaseModel):
+    id: int
+    goal_id: int
+    filename: str
+    content: str
+    concepts: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+
+class CreateUserRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class CreateRoadmapTargetRequest(BaseModel):
+    title: str = Field(min_length=3, max_length=160)
+    description: str = Field(default="", max_length=500)
+    target_type: Literal["mastery", "checkpoint", "practice"] = "checkpoint"
+    target_value: float = Field(default=1.0, ge=0.0, le=100.0)
+    concept: Optional[str] = Field(default=None, max_length=200)
+
+
+class UpdateRoadmapTargetRequest(BaseModel):
+    completed: bool
+
+
+class UserRow(BaseModel):
+    id: int
+    name: str
+    created_at: datetime
+
+
+class ConceptNode(BaseModel):
+    concept: str
+    mastery: float = 0.0
+    samples: int = 0
+    day_nums: list[int] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
+
+
 # ---------- Stored / view models (DB-aware) ----------
 
 class GoalRow(BaseModel):
     id: int
+    user_id: int = 1
     text: str
     level: Level
     deadline_days: int
@@ -280,6 +399,10 @@ class PlanDayRow(BaseModel):
     concepts: list[str]
     activities: list[str]
     suggested_resources: list[str]
+    checkpoint: str = ""
+    success_criteria: list[str] = Field(default_factory=list)
+    estimated_minutes: int = 60
+    difficulty: Literal["foundation", "core", "stretch", "synthesis"] = "core"
     status: Literal["pending", "in_progress", "done"] = "pending"
 
 
