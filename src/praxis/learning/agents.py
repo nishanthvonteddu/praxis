@@ -18,11 +18,24 @@ from praxis.learning.models import (
     CheckInPlan,
     FeynmanExchange,
     FeynmanTurn,
+    FlashcardSet,
     GradedAnswer,
     Plan,
+    Question,
     ResourceCheck,
     SearchHit,
+    SocraticTurn,
 )
+
+QUALITY_STANDARD = """\
+# PROFESSIONAL CONTENT STANDARD
+- Be domain-specific and technically accurate. Never substitute generic study advice for content.
+- Every learner-facing item must have one clear purpose, appropriate difficulty, and an observable outcome.
+- Prefer mechanisms, decisions, comparisons, examples, and failure modes over trivia or vague definitions.
+- Do not invent facts, citations, tools, or prerequisites. State uncertainty when the supplied context is insufficient.
+- Avoid filler such as "study", "learn more", "understand the basics", or "in your own words" unless followed by a precise task.
+- Calibrate terminology, scaffolding, and expected depth to the learner's stated level.
+"""
 
 
 def _schema_instructions(model_cls: type) -> str:
@@ -118,7 +131,7 @@ def _model_for(provider_name: str) -> OpenAIModel:
 
 # ---------- Planner ----------
 
-PLANNER_SYSTEM = """\
+PLANNER_SYSTEM = QUALITY_STANDARD + """\
 # ROLE
 You are an expert curriculum planner. You design realistic, sequenced learning paths \
 that respect the learner's current level and time budget.
@@ -142,6 +155,10 @@ your thinking in the `reasoning` field of the output:
      synthesis / capstone, not new material.
   5. DESIGN concrete, verifiable activities for each day \
      ("implement scaled dot-product attention in numpy" — NOT "study attention").
+  6. DEFINE a checkpoint: one artifact, demonstration, decision, or explanation that \
+     provides evidence the objective was met. Add 2-4 observable success criteria.
+  7. ESTIMATE focused minutes and label difficulty. The final day must use \
+     difficulty="synthesis".
 
 # REASONING TYPES
 Tag the kinds of reasoning you used in `reasoning_types` (any of: \
@@ -156,6 +173,8 @@ Before finalizing, verify each of these and summarize the verifications in `self
   - Activities are concrete (verifiable outputs) and not vague ("study X", "read about X").
   - The last day is synthesis/application — no brand-new concepts introduced.
   - Each concept appears in at most ~2 days (avoid pointless repetition).
+  - Every day has a non-empty checkpoint, 2-4 measurable success criteria, at least \
+    two concrete activities, and a realistic time estimate.
 
 # ERROR HANDLING & FALLBACKS
   - If the goal is vague, infer a reasonable scope and STATE the interpretation in \
@@ -215,10 +234,44 @@ def _planner_user_prompt(goal_text: str, level: str, deadline_days: int) -> str:
     )
 
 
+def validate_plan_quality(plan: Plan, requested_days: int) -> Plan:
+    problems: list[str] = []
+    if plan.total_days != requested_days or len(plan.days) != requested_days:
+        problems.append(f"expected exactly {requested_days} days")
+    if [d.day_num for d in plan.days] != list(range(1, requested_days + 1)):
+        problems.append("day numbers must be sequential")
+    vague = ("study ", "learn about", "understand ", "review the topic")
+    for day in plan.days:
+        if len(day.activities) < 2:
+            problems.append(f"day {day.day_num} needs at least two activities")
+        if any(a.lower().strip().startswith(vague) for a in day.activities):
+            problems.append(f"day {day.day_num} contains a vague activity")
+        if len(day.checkpoint.strip()) < 12:
+            problems.append(f"day {day.day_num} needs a concrete checkpoint")
+        if not 2 <= len(day.success_criteria) <= 4:
+            problems.append(f"day {day.day_num} needs 2-4 success criteria")
+    if plan.days and plan.days[-1].difficulty != "synthesis":
+        problems.append("final day must be synthesis")
+    if problems:
+        raise ValueError("plan failed instructional quality checks: " + "; ".join(dict.fromkeys(problems)))
+    return plan
+
+
 async def generate_plan(goal_text: str, level: str, deadline_days: int, provider: str | None = None) -> Plan:
     agent = make_planner_agent(provider)
-    result = await agent.run(_planner_user_prompt(goal_text, level, deadline_days))
-    return result.output
+    prompt = _planner_user_prompt(goal_text, level, deadline_days)
+    last_error = None
+    for attempt in range(2):
+        result = await agent.run(prompt)
+        try:
+            return validate_plan_quality(result.output, deadline_days)
+        except ValueError as exc:
+            last_error = exc
+            prompt += (
+                "\n\nYour previous draft failed quality control. Repair every issue and return "
+                f"a complete replacement: {exc}"
+            )
+    raise last_error or ValueError("plan failed quality checks")
 
 
 # A full Plan JSON (reasoning + self_check + per-day concepts/activities/resources)
@@ -228,10 +281,13 @@ async def generate_plan(goal_text: str, level: str, deadline_days: int, provider
 PLAN_MAX_TOKENS = 5000
 
 
-def _parse_plan(full: str) -> Plan:
+def _parse_plan(full: str, requested_days: int) -> Plan:
     """Parse streamed text into a Plan, with an actionable error if it was truncated."""
     try:
-        return Plan.model_validate_json(_extract_json(full))
+        return validate_plan_quality(
+            Plan.model_validate_json(_extract_json(full)),
+            requested_days,
+        )
     except Exception as e:
         raise RuntimeError(
             "The plan response was incomplete or not valid JSON — the model most likely hit "
@@ -249,7 +305,7 @@ async def stream_plan(goal_text: str, level: str, deadline_days: int, provider: 
     full = ""
     async for delta, full in _stream_gateway(system, user, provider, max_tokens=PLAN_MAX_TOKENS):
         yield "token", delta
-    plan = _parse_plan(full)
+    plan = _parse_plan(full, deadline_days)
     yield "done", plan
 
 
@@ -267,13 +323,13 @@ async def stream_refine_plan(prev_plan: Plan, instruction: str, provider: str | 
     full = ""
     async for delta, full in _stream_gateway(system, user, provider, max_tokens=PLAN_MAX_TOKENS):
         yield "token", delta
-    plan = _parse_plan(full)
+    plan = _parse_plan(full, prev_plan.total_days)
     yield "done", plan
 
 
 # ---------- Check-in planner ----------
 
-CHECKIN_SYSTEM = """\
+CHECKIN_SYSTEM = QUALITY_STANDARD + """\
 # ROLE
 You are a learning coach designing today's diagnostic check-in. Your goal is not to \
 quiz broadly but to surface the gaps the learner most needs to close.
@@ -295,6 +351,8 @@ Capture your reasoning in the `reasoning` field:
   4. CRAFT each question to be specific. Replace "explain X" with \
      "explain how X handles edge case Y" or "describe what X computes \
      and why we need it instead of Z".
+  5. Add `intent` and 2-4 `expected_elements` for each question. These form a \
+     compact grading rubric and must be specific to the concept.
 
 # REASONING TYPES
 Implicit in your reasoning: diagnostic-targeting, weakness-prioritization, \
@@ -366,12 +424,28 @@ async def plan_check_in(
         f"Design 3 questions for this check-in following the rules in your system prompt."
     )
     result = await agent.run(prompt)
-    return result.output
+    return validate_checkin_quality(result.output, concepts)
+
+
+def validate_checkin_quality(plan: CheckInPlan, concepts: list[str]) -> CheckInPlan:
+    normalized = {c.lower() for c in concepts}
+    if len(plan.questions) != 3:
+        raise ValueError("check-in must contain exactly three questions")
+    if sum(q.kind == "feynman" for q in plan.questions) != 1:
+        raise ValueError("check-in must contain exactly one Feynman question")
+    if sum(q.kind == "quiz" for q in plan.questions) != 2:
+        raise ValueError("check-in must contain exactly two quiz questions")
+    for question in plan.questions:
+        if question.concept.lower() not in normalized:
+            raise ValueError(f"unknown concept in question: {question.concept}")
+        if len(question.prompt.strip()) < 25 or len(question.expected_elements) < 2:
+            raise ValueError(f"question for {question.concept} lacks a professional rubric")
+    return plan
 
 
 # ---------- Grader ----------
 
-GRADER_SYSTEM = """\
+GRADER_SYSTEM = QUALITY_STANDARD + """\
 # ROLE
 You are a strict but fair grader. You evaluate a learner's answer to a specific question \
 on a specific concept. You favor real understanding over jargon, and you penalize \
@@ -465,22 +539,31 @@ def make_grader_agent() -> Agent[None, GradedAnswer]:
     )
 
 
-async def grade_answer(question_prompt: str, concept: str, kind: str, answer_text: str) -> GradedAnswer:
+async def grade_answer(
+    question_prompt: str,
+    concept: str,
+    kind: str,
+    answer_text: str,
+    expected_elements: list[str] | None = None,
+) -> GradedAnswer:
     agent = make_grader_agent()
     prompt = (
         f"Question kind: {kind}\n"
         f"Concept being assessed: {concept}\n"
         f"Question: {question_prompt}\n\n"
+        f"Expected answer elements: {json.dumps(expected_elements or [])}\n\n"
         f"Learner's answer:\n\"\"\"\n{answer_text}\n\"\"\"\n\n"
         f"Grade this answer."
     )
     result = await agent.run(prompt)
-    return result.output
+    grade = result.output
+    grade.correct = grade.score >= 0.7
+    return grade
 
 
 # ---------- Feynman tutor (Mode 2) ----------
 
-FEYNMAN_SYSTEM = """\
+FEYNMAN_SYSTEM = QUALITY_STANDARD + """\
 # ROLE
 You are a Feynman-technique tutor. The learner is trying to explain a single concept \
 in their own words, as if teaching a curious friend. Your job is NOT to lecture — it is \
@@ -577,7 +660,7 @@ async def feynman_turn(
 
 # ---------- Resource verifier (web-search tool) ----------
 
-RESOURCE_VERIFIER_SYSTEM = """\
+RESOURCE_VERIFIER_SYSTEM = QUALITY_STANDARD + """\
 # ROLE
 You are a resource verifier. A curriculum planner suggested learning resources for a day \
 of study, but it may have invented or misremembered them. You are given REAL web-search \
@@ -650,4 +733,175 @@ async def verify_resources(
         f"Verify each suggested resource against the search results. Attach only real URLs."
     )
     result = await agent.run(prompt)
+    valid_urls = {hit.url for hits in hits_by_query.values() for hit in hits}
+    for resource in result.output.resources:
+        if resource.url not in valid_urls:
+            resource.url = ""
+            resource.verified = False
+        else:
+            resource.verified = True
     return result.output
+
+
+# ---------- Adaptive quiz (Mode 4) ----------
+
+def build_adaptive_questions(
+    concepts: list[str],
+    mastery: dict[str, float],
+    prerequisites: dict[str, list[str]],
+    count: int = 5,
+) -> list[Question]:
+    """Build a deterministic question set; grading still uses the calibrated grader."""
+    ranked = sorted(concepts, key=lambda c: (mastery.get(c, 0.0), c.lower()))
+    questions: list[Question] = []
+    for i, concept in enumerate(ranked[:count]):
+        score = mastery.get(concept, 0.0)
+        deps = prerequisites.get(concept, [])
+        dependency = deps[0] if deps else None
+        if score < 0.35:
+            prompt = (
+                f"A teammate is about to use {concept} without understanding it. Explain the "
+                "problem it solves, its core mechanism, and one sign that it is being used correctly."
+            )
+            difficulty = "foundation"
+            intent = "Diagnose whether the learner connects definition, purpose, and mechanism."
+            expected = ["problem or purpose", "core mechanism", "observable success signal"]
+        elif score < 0.7:
+            dep_text = f" while correctly using {dependency}" if dependency else ""
+            prompt = (
+                f"Work through a realistic example that requires {concept}{dep_text}. "
+                "State the inputs, justify the key decision, and explain how you would verify the result."
+            )
+            difficulty = "application"
+            intent = "Test transfer from conceptual knowledge to a defensible procedure."
+            expected = ["concrete inputs or scenario", "justified decision", "verification method"]
+        else:
+            prompt = (
+                f"A solution using {concept} appears correct under normal conditions but fails in "
+                "production. Identify a plausible edge case, trace why it fails, and propose a "
+                "correction plus a test that would prevent regression."
+            )
+            difficulty = "analysis"
+            intent = "Evaluate robust understanding through failure analysis and prevention."
+            expected = ["plausible edge case", "causal failure trace", "correction", "regression test"]
+        questions.append(Question(
+            kind="quiz",
+            concept=concept,
+            prompt=prompt,
+            difficulty=difficulty,
+            intent=intent,
+            expected_elements=expected,
+        ))
+    return questions
+
+
+# ---------- Professional flashcard generation ----------
+
+FLASHCARD_SYSTEM = QUALITY_STANDARD + """\
+# ROLE
+You are an expert learning designer creating a compact, high-retention flashcard deck.
+
+# RULES
+- Create 1-2 cards per selected concept and vary card types across the deck.
+- Fronts must require retrieval or reasoning, not yes/no recognition.
+- Backs must be self-contained, accurate teaching answers with the mechanism or rationale.
+- Use contrasts, worked micro-examples, decisions, and failure modes where they improve retention.
+- Do not write meta-answers such as "give an example" or restate the prompt.
+- Keep one testable idea per card. Avoid trivia and duplicate cards.
+- Match the supplied learner level and curriculum context.
+
+# OUTPUT
+Return a single FlashcardSet JSON object and nothing else.
+"""
+
+
+def make_flashcard_agent() -> Agent[None, FlashcardSet]:
+    return Agent(
+        model=_model_for(settings.checkin_provider),
+        output_type=PromptedOutput(FlashcardSet),
+        system_prompt=FLASHCARD_SYSTEM,
+        retries=2,
+    )
+
+
+async def generate_flashcards(
+    goal: str,
+    level: str,
+    plan_context: list[dict],
+    mastery: dict[str, float],
+) -> FlashcardSet:
+    selected = sorted(
+        {c for day in plan_context for c in day["concepts"]},
+        key=lambda c: (mastery.get(c, 0.0), c.lower()),
+    )[:12]
+    prompt = (
+        f"Learning goal: {goal}\nLearner level: {level}\n"
+        f"Priority concepts: {json.dumps(selected)}\n"
+        f"Mastery: {json.dumps(mastery)}\n"
+        f"Curriculum context: {json.dumps(plan_context)}\n\n"
+        "Create a professional deck focused on the priority concepts."
+    )
+    result = await make_flashcard_agent().run(prompt)
+    cards = result.output.cards
+    valid = set(selected)
+    if len(cards) < 3:
+        raise ValueError("flashcard deck contains too few cards")
+    if any(c.concept not in valid or len(c.back.split()) < 8 for c in cards):
+        raise ValueError("flashcard deck failed concept or answer quality checks")
+    return result.output
+
+
+# ---------- Socratic explainer (Mode 5) ----------
+
+SOCRATIC_SYSTEM = QUALITY_STANDARD + """\
+# ROLE
+You are a rigorous Socratic tutor guiding discovery of one concept. Ask exactly one
+focused question per turn and make each question depend on the learner's latest reasoning.
+
+# METHOD
+1. Infer which layer is missing: purpose, mental model, mechanism, application, boundary,
+   or synthesis.
+2. Briefly acknowledge one thing established or name one misconception.
+3. Ask the smallest next question that lets the learner discover the missing layer.
+4. Do not lecture, stack questions, reveal the complete answer, or praise an incorrect claim.
+5. Calibrate vocabulary and scaffolding to the learner's level.
+
+# COMPLETION
+Set complete=true only at understanding >= 0.8 when the learner can explain purpose and
+mechanism and can transfer the idea to a concrete case. When complete, the final question
+should be one concise synthesis or transfer prompt.
+
+# OUTPUT
+Return JSON matching SocraticTurn with specific feedback and exactly one question.
+"""
+
+
+def make_socratic_agent() -> Agent[None, SocraticTurn]:
+    return Agent(
+        model=_model_for(settings.feynman_provider),
+        output_type=PromptedOutput(SocraticTurn),
+        system_prompt=SOCRATIC_SYSTEM,
+        retries=2,
+    )
+
+
+async def socratic_turn(
+    concept: str,
+    level: str,
+    transcript: list[dict],
+    answer_text: str,
+) -> SocraticTurn:
+    agent = make_socratic_agent()
+    prompt = (
+        f"Concept: {concept}\nLearner level: {level}\n"
+        f"Transcript: {json.dumps(transcript, ensure_ascii=True)}\n"
+        f"Latest learner answer: {answer_text}\n"
+        "Continue the guided discovery with exactly one question."
+    )
+    result = await agent.run(prompt)
+    turn = result.output
+    if turn.complete and turn.understanding < 0.8:
+        turn.complete = False
+    if turn.question.count("?") > 1:
+        turn.question = turn.question.split("?", 1)[0].strip() + "?"
+    return turn
