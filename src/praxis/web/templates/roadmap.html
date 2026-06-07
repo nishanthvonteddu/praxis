@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Roadmap · {{ goal.text[:50] }}{% endblock %}
+{% block content %}
+<section class="roadmap-page">
+  <a href="/" class="back-link">← My learning</a>
+  <header class="goal-header">
+    <div>
+      <h1>{{ goal.text }}</h1>
+      <p class="muted">Your full learning journey and milestones.</p>
+    </div>
+  </header>
+  <nav class="workspace-tabs" aria-label="Learning workspace">
+    <a href="/goals/{{ goal.id }}">Today</a>
+    <a class="active" href="/goals/{{ goal.id }}/roadmap">Journey</a>
+    <a href="/goals/{{ goal.id }}/lab">Practice</a>
+  </nav>
+
+  <section class="roadmap-hero">
+    <div class="progress-orbit" style="--progress: {{ roadmap.overall_progress * 360 }}deg">
+      <div><strong id="overall-percent">{{ (roadmap.overall_progress * 100)|round|int }}%</strong><span>complete</span></div>
+    </div>
+    <div>
+      <p class="section-label">Current focus</p>
+      <h2>{% if roadmap.current_day %}Day {{ roadmap.current_day }}{% else %}Route complete{% endif %}</h2>
+      {% set current = namespace(topic='Review your completed milestones and set a new target.') %}
+      {% for item in roadmap.checkpoints %}{% if item.state in ['active', 'ready'] %}{% set current.topic = item.topic %}{% endif %}{% endfor %}
+      <p class="muted">{{ current.topic }}</p>
+    </div>
+    <div class="roadmap-metrics">
+      <div><strong>{{ roadmap.checkpoints|selectattr('state', 'equalto', 'complete')|list|length }}/{{ roadmap.checkpoints|length }}</strong><span>checkpoints</span></div>
+      <div><strong>{{ roadmap.targets|selectattr('completed', 'equalto', true)|list|length }}/{{ roadmap.targets|length }}</strong><span>targets</span></div>
+    </div>
+  </section>
+
+  <div class="roadmap-layout">
+    <section class="route-map" aria-label="Learning milestones">
+      {% for item in roadmap.checkpoints %}
+        <button class="route-stop state-{{ item.state }} {% if loop.first %}selected{% endif %}"
+                id="checkpoint-{{ item.id }}"
+                data-checkpoint='{{ item|tojson|forceescape }}'>
+          <span class="route-rail"></span>
+          <span class="route-marker">{{ "✓" if item.state == "complete" else item.day_num }}</span>
+          <span class="route-copy">
+            <small>Day {{ item.day_num }} · {{ item.difficulty }} · {{ item.estimated_minutes }} min</small>
+            <strong>{{ item.topic }}</strong>
+            <span>{{ item.checkpoint }}</span>
+          </span>
+          <span class="route-score">{{ (item.current_mastery * 100)|round|int }}%</span>
+        </button>
+      {% endfor %}
+    </section>
+
+    <aside class="checkpoint-inspector" id="checkpoint-inspector">
+      <p class="section-label">Selected milestone</p>
+      <h2 id="inspector-title"></h2>
+      <p class="muted" id="inspector-objective"></p>
+      <div class="inspector-progress"><span id="inspector-progress"></span></div>
+      <div class="checkpoint-block">
+        <small>Evidence target</small>
+        <p id="inspector-checkpoint"></p>
+      </div>
+      <div class="checkpoint-block">
+        <small>Success criteria</small>
+        <ul id="inspector-criteria"></ul>
+      </div>
+      <div class="checkpoint-block">
+        <small>Concepts</small>
+        <div id="inspector-concepts" class="concepts"></div>
+      </div>
+      <a id="inspector-action" class="primary-link" href="#">Open checkpoint →</a>
+    </aside>
+  </div>
+
+  <section class="target-board">
+    <header class="section-heading">
+      <div><p class="section-label">Personal targets</p><h2>Define the next win</h2></div>
+      <span class="muted">Saved to this learning goal</span>
+    </header>
+    <form id="target-form" class="target-form">
+      <input name="title" minlength="3" maxlength="160" required placeholder="e.g. Explain the core mechanism without notes">
+      <select name="target_type">
+        <option value="checkpoint">Milestone</option>
+        <option value="mastery">Mastery</option>
+        <option value="practice">Practice</option>
+      </select>
+      <input name="description" maxlength="500" placeholder="What evidence will count?">
+      <button class="primary">Add target</button>
+    </form>
+    <div id="target-list" class="target-list">
+      {% for target in roadmap.targets %}
+        <article class="target-item {% if target.completed %}completed{% endif %}" data-target-id="{{ target.id }}">
+          <button class="target-check" aria-label="Toggle target">{{ "✓" if target.completed else "" }}</button>
+          <div><small>{{ target.target_type }}</small><strong>{{ target.title }}</strong><p>{{ target.description }}</p></div>
+          <button class="target-delete" aria-label="Delete target">×</button>
+        </article>
+      {% else %}
+        <p class="empty-targets muted">No custom targets yet. Add one that defines observable evidence, not just effort.</p>
+      {% endfor %}
+    </div>
+  </section>
+</section>
+
+<script>
+const GOAL_ID = {{ goal.id }};
+const escapeHTML = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function selectCheckpoint(button) {
+  document.querySelectorAll('.route-stop').forEach(x => x.classList.remove('selected'));
+  button.classList.add('selected');
+  const item = JSON.parse(button.dataset.checkpoint);
+  document.getElementById('inspector-title').textContent = `Day ${item.day_num}: ${item.topic}`;
+  document.getElementById('inspector-objective').textContent = item.objective;
+  document.getElementById('inspector-checkpoint').textContent = item.checkpoint;
+  document.getElementById('inspector-progress').style.width = `${Math.round(item.progress * 100)}%`;
+  document.getElementById('inspector-criteria').innerHTML = item.success_criteria.map(x => `<li>${escapeHTML(x)}</li>`).join('');
+  document.getElementById('inspector-concepts').innerHTML = item.concepts.map(x => `<span class="tag">${escapeHTML(x)}</span>`).join('');
+  document.getElementById('inspector-action').href = `/days/${item.id}`;
+}
+document.querySelectorAll('.route-stop').forEach(button => button.addEventListener('click', () => selectCheckpoint(button)));
+const hashTarget = location.hash ? document.querySelector(location.hash) : null;
+selectCheckpoint(hashTarget && hashTarget.classList.contains('route-stop')
+  ? hashTarget
+  : document.querySelector('.route-stop'));
+
+function bindTarget(item) {
+  item.querySelector('.target-check').addEventListener('click', async () => {
+    const completed = !item.classList.contains('completed');
+    const r = await fetch(`/api/targets/${item.dataset.targetId}`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({completed})
+    });
+    if (r.ok) location.reload();
+  });
+  item.querySelector('.target-delete').addEventListener('click', async () => {
+    const r = await fetch(`/api/targets/${item.dataset.targetId}`, {method:'DELETE'});
+    if (r.ok) location.reload();
+  });
+}
+document.querySelectorAll('.target-item').forEach(bindTarget);
+document.getElementById('target-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.target);
+  const r = await fetch(`/api/goals/${GOAL_ID}/targets`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      title:form.get('title'), description:form.get('description'),
+      target_type:form.get('target_type'), target_value:1
+    })
+  });
+  if (r.ok) location.reload();
+});
+</script>
+{% endblock %}
