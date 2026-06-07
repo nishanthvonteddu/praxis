@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% block title %}Practice · {{ goal.text[:50] }}{% endblock %}
+{% block content %}
+<section class="lab-page">
+  <a href="/" class="back-link">← My learning</a>
+  <header class="goal-header">
+    <div><h1>{{ goal.text }}</h1><p class="muted">Choose a practice activity based on what you need right now.</p></div>
+    <div class="lab-summary"><strong>{{ cards|length }}</strong><span>reviews due</span></div>
+  </header>
+  <nav class="workspace-tabs" aria-label="Learning workspace">
+    <a href="/goals/{{ goal.id }}">Today</a>
+    <a href="/goals/{{ goal.id }}/roadmap">Journey</a>
+    <a class="active" href="/goals/{{ goal.id }}/lab">Practice</a>
+  </nav>
+
+  <div class="practice-intro">
+    <h2>What would help most?</h2>
+    <p class="muted">Start with review when cards are due. Use a quiz to test yourself, or guided help when a concept feels unclear.</p>
+  </div>
+  <nav class="mode-tabs practice-choices">
+    <button class="ghost-btn" data-tab="flashcards"><strong>Review</strong><span>{{ cards|length }} questions due</span></button>
+    <button class="ghost-btn" data-tab="adaptive"><strong>Test myself</strong><span>Questions that adjust to me</span></button>
+    <button class="ghost-btn" data-tab="socratic"><strong>Get guided help</strong><span>Work through one idea</span></button>
+    <button class="ghost-btn" data-tab="notes"><strong>Add my notes</strong><span>Import study material</span></button>
+    <button class="ghost-btn" data-tab="graph"><strong>See my progress</strong><span>Knowledge by topic</span></button>
+  </nav>
+
+  <section class="mode-panel" id="panel-flashcards">
+    <h2>Quick review</h2>
+    <p class="muted">Answer from memory, reveal the explanation, then rate how difficult it felt. Praxis schedules the next review for you.</p>
+    <div id="card-stage">
+      {% if cards %}
+        {% for card in cards %}
+          <article class="flashcard" data-card-id="{{ card.id }}" {% if not loop.first %}hidden{% endif %}>
+            <p class="q-meta">{{ card.concept }} · review {{ card.reps + 1 }}</p>
+            <h3>{{ card.front }}</h3>
+            <button class="ghost-btn reveal-card">Reveal answer</button>
+            <div class="card-back" hidden>
+              <p>{{ card.back }}</p>
+              <div class="rating-row">
+                <button data-rating="1">Again</button><button data-rating="2">Hard</button>
+                <button data-rating="3">Good</button><button data-rating="4">Easy</button>
+              </div>
+            </div>
+          </article>
+        {% endfor %}
+      {% else %}
+        <div class="summary-card" id="empty-deck">
+          <h3>Build a professional review deck</h3>
+          <p>Generate retrieval, mechanism, application, and failure-mode cards from your plan and current mastery.</p>
+          <button class="primary" id="generate-deck">Generate deck</button>
+          <p class="muted small" id="deck-status"></p>
+        </div>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="mode-panel" id="panel-adaptive" hidden>
+    <h2>Test yourself</h2>
+    <p class="muted">Questions include a diagnostic intent and answer rubric. Difficulty moves from mechanism recall to application and failure analysis.</p>
+    <button class="primary" id="adaptive-start">Start adaptive quiz</button>
+    <div id="adaptive-stage"></div>
+  </section>
+
+  <section class="mode-panel" id="panel-socratic" hidden>
+    <h2>Guided help</h2>
+    <label>Choose a concept
+      <select id="socratic-concept">
+        {% for node in graph.nodes %}<option value="{{ node.concept }}">{{ node.concept }}</option>{% endfor %}
+      </select>
+    </label>
+    <button class="primary" id="socratic-start">Start guided discovery</button>
+    <div id="socratic-stage"></div>
+  </section>
+
+  <section class="mode-panel" id="panel-notes" hidden>
+    <h2>Add your own notes</h2>
+    <p class="muted">Upload a text, Markdown, CSV, or JSON file. Praxis connects useful topics from your notes to this journey.</p>
+    <form id="note-form" class="upload-form">
+      <input type="file" name="file" accept=".txt,.md,.csv,.json,text/plain,text/markdown" required>
+      <button class="primary">Ingest note</button>
+    </form>
+    <div id="note-result"></div>
+    <ul class="resource-list">
+      {% for note in notes %}
+        <li class="resource"><strong>{{ note.filename }}</strong>
+          <span class="muted small">{{ note.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+          <p>{% for c in note.concepts %}<span class="tag">{{ c }}</span>{% endfor %}</p>
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <section class="mode-panel" id="panel-graph" hidden>
+    <h2>Knowledge progress</h2>
+    <p class="muted">See which topics are becoming strong and which ones need another pass.</p>
+    <div class="concept-graph">
+      {% for node in graph.nodes %}
+        <article>
+          <strong>{{ node.concept }}</strong>
+          <span class="score">{{ '%.0f'|format(node.mastery * 100) }}%</span>
+          <span class="bar"><span class="fill" style="width:{{ node.mastery * 100 }}%"></span></span>
+          {% if node.prerequisites %}<p class="muted small">After: {{ node.prerequisites|join(', ') }}</p>{% endif %}
+        </article>
+      {% endfor %}
+    </div>
+    {% if events %}
+      <h3>Automatic plan adjustments</h3>
+      {% for event in events %}
+        <p class="caveat-box">{{ event.reason }}: {{ event.weak_concepts|join(', ') }} · {{ event.created_at }}</p>
+      {% endfor %}
+    {% endif %}
+  </section>
+</section>
+
+<script>
+const GOAL_ID = {{ goal.id }};
+const escapeHTML = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+document.querySelectorAll('[data-tab]').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.mode-panel').forEach(p => p.hidden = true);
+  document.querySelectorAll('[data-tab]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(`panel-${btn.dataset.tab}`).hidden = false;
+}));
+document.querySelector('[data-tab="flashcards"]')?.classList.add('active');
+
+document.querySelectorAll('.reveal-card').forEach(btn => btn.addEventListener('click', () => {
+  btn.hidden = true;
+  btn.nextElementSibling.hidden = false;
+}));
+document.querySelectorAll('.rating-row button').forEach(btn => btn.addEventListener('click', async () => {
+  const card = btn.closest('.flashcard');
+  const r = await fetch(`/api/flashcards/${card.dataset.cardId}/review`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rating:Number(btn.dataset.rating)})
+  });
+  if (!r.ok) return;
+  card.hidden = true;
+  const next = card.nextElementSibling;
+  if (next) next.hidden = false;
+  else document.getElementById('card-stage').innerHTML = '<p class="summary-card">Review complete. Nothing else is due.</p>';
+}));
+document.getElementById('generate-deck')?.addEventListener('click', async event => {
+  const button = event.currentTarget;
+  const status = document.getElementById('deck-status');
+  button.disabled = true;
+  button.textContent = 'Designing deck…';
+  status.textContent = 'Selecting weak concepts and writing answer-complete cards.';
+  const r = await fetch(`/api/goals/${GOAL_ID}/flashcards/generate`, {method:'POST'});
+  const d = await r.json();
+  if (!r.ok) {
+    status.textContent = d.detail || 'Deck generation failed.';
+    button.disabled = false;
+    button.textContent = 'Try again';
+    return;
+  }
+  status.textContent = `${d.created} cards created. Reloading…`;
+  location.reload();
+});
+
+let adaptive = null, adaptiveIndex = 0;
+document.getElementById('adaptive-start').addEventListener('click', async () => {
+  const r = await fetch('/api/adaptive/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({goal_id:GOAL_ID,count:5})});
+  const d = await r.json();
+  if (!r.ok) { document.getElementById('adaptive-stage').innerHTML = `<p class="error">${escapeHTML(d.detail)}</p>`; return; }
+  adaptive = d; adaptiveIndex = 0; renderAdaptive();
+});
+function renderAdaptive() {
+  const q = adaptive.questions[adaptiveIndex];
+  document.getElementById('adaptive-stage').innerHTML = `<article class="question-card">
+    <p class="q-meta">Question ${adaptiveIndex+1}/${adaptive.questions.length} · ${escapeHTML(q.concept)} · ${escapeHTML(q.difficulty)}</p>
+    <p class="question-intent">${escapeHTML(q.intent)}</p>
+    <p class="q-prompt">${escapeHTML(q.prompt)}</p><textarea id="adaptive-answer"></textarea>
+    <button class="primary" onclick="answerAdaptive()">Submit</button><div id="adaptive-grade"></div></article>`;
+}
+async function answerAdaptive() {
+  const answer = document.getElementById('adaptive-answer').value.trim(); if (!answer) return;
+  const r = await fetch('/api/adaptive/answer', {method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session:adaptive.session,question_index:adaptiveIndex,answer_text:answer})});
+  const d = await r.json();
+  if (!r.ok) { document.getElementById('adaptive-grade').innerHTML=`<p class="error">${escapeHTML(d.detail)}</p>`; return; }
+  document.getElementById('adaptive-grade').innerHTML = `<div class="grade-card ${d.grade.correct?'ok':'partial'}">
+    <strong>${Math.round(d.grade.score*100)}%</strong><p>${escapeHTML(d.grade.feedback)}</p></div>
+    ${d.done?'<a href="" class="primary-link">Quiz complete · refresh mastery →</a>':'<button class="primary" onclick="nextAdaptive()">Next question</button>'}`;
+}
+function nextAdaptive(){ adaptiveIndex++; renderAdaptive(); }
+
+let socraticSession = null;
+document.getElementById('socratic-start').addEventListener('click', async () => {
+  const concept = document.getElementById('socratic-concept').value;
+  const r = await fetch('/api/socratic/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal_id:GOAL_ID,concept})});
+  const d = await r.json(); socraticSession=d.session; renderSocratic(d.question);
+});
+function renderSocratic(question, feedback='') {
+  document.getElementById('socratic-stage').innerHTML = `<article class="question-card">
+    ${feedback?`<p class="muted">${escapeHTML(feedback)}</p>`:''}<p class="q-prompt">${escapeHTML(question)}</p>
+    <textarea id="socratic-answer"></textarea><button class="primary" onclick="replySocratic()">Reply</button></article>`;
+}
+async function replySocratic(){
+  const text=document.getElementById('socratic-answer').value.trim(); if(!text)return;
+  const r=await fetch('/api/socratic/reply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:socraticSession,answer_text:text})});
+  const d=await r.json();
+  if(!r.ok){document.getElementById('socratic-stage').innerHTML=`<p class="error">${escapeHTML(d.detail)}</p>`;return;}
+  if(d.done) document.getElementById('socratic-stage').innerHTML=`<div class="summary-card"><h3>Session complete</h3><p>${escapeHTML(d.turn.feedback)}</p><strong>${Math.round(d.turn.understanding*100)}% understanding</strong></div>`;
+  else renderSocratic(d.turn.question,d.turn.feedback);
+}
+
+document.getElementById('note-form').addEventListener('submit', async e => {
+  e.preventDefault(); const r=await fetch(`/api/goals/${GOAL_ID}/notes`,{method:'POST',body:new FormData(e.target)});
+  const d=await r.json();
+  document.getElementById('note-result').innerHTML=r.ok
+    ? `<p class="summary-card">Ingested ${escapeHTML(d.filename)}. Concepts: ${d.concepts.map(escapeHTML).join(', ') || 'none detected'}.</p>`
+    : `<p class="error">${escapeHTML(d.detail)}</p>`;
+});
+</script>
+{% endblock %}
