@@ -1,6 +1,6 @@
 # Praxis
 
-> **Agentic learning platform.** Tell it what you want to learn. It builds a day-by-day plan, quizzes you, tracks what you actually know, adapts as you go — and shows you exactly how it's thinking.
+> **Agentic learning platform.** Tell it what you want to learn. Praxis gives you one clear next step each day, tracks what you actually know, and adapts the journey as you go.
 
 ![Praxis Hero](assets/praxis_hero.png)
 
@@ -20,7 +20,7 @@ Praxis runs on a **local multi-provider LLM gateway** (Gemini · Groq · Cerebra
 8. [HTTP API](#8-http-api)
 9. [Project structure](#9-project-structure)
 10. [Design principles](#10-design-principles)
-11. [Roadmap](#11-roadmap)
+11. [Learning modes](#11-learning-modes)
 12. [Tech stack](#12-tech-stack)
 13. [License](#13-license)
 
@@ -34,17 +34,33 @@ Praxis is an opinionated, single-user learning app. You give it a goal — *"und
 2. **Check in** — each day, a short diagnostic: one Feynman-style explanation question + two targeted quiz questions on your weakest concepts.
 3. **Grade** — a second agent scores each answer on a calibrated 0.0–1.0 rubric, with feedback and named gaps.
 4. **Track** — per-concept mastery updates via a recency-biased exponential moving average.
-5. **Refine** — ask the planner to modify the curriculum (*"skip day 1, I already know calculus"*) and it generates a new plan version.
+5. **Adapt** — weak concepts change upcoming practice, and you can adjust the plan when your time or prior knowledge changes.
 
-Every LLM call goes through a **local gateway** that rotates across providers transparently. You watch the whole thing stream token-by-token, with each agent's reasoning, self-checks, and confidence visible in the UI.
+Each goal uses one consistent workspace:
+
+- **Today** — the recommended lesson and the next Learn → Practice → Check sequence.
+- **Journey** — the full schedule, milestones, success criteria, progress, and personal targets.
+- **Practice** — review questions, adaptive quizzes, guided help, notes, and topic-level progress.
+
+Every LLM call goes through a **local gateway** that rotates across providers transparently. Advanced model and agent details remain available without competing with the learner's primary task.
 
 ---
 
 ## 2. Features
 
 - **Day-by-day curriculum generation**, streamed live as the agent reasons.
+- **Professional content quality gates** — plans and questions are rejected when they are vague, incomplete, poorly sequenced, or lack measurable answer criteria.
+- **A simplified Today / Journey / Practice workspace** with one recommended next action.
+- **Interactive milestones and personal targets** backed by real plan, mastery, and completion data.
 - **Daily check-ins** — 1 Feynman + 2 quiz questions targeted at your weakest concepts.
 - **Feynman mode** — explain a concept in your own words; a tutor finds the gaps and asks Socratic follow-ups until your explanation is solid, then updates mastery.
+- **Spaced-repetition flashcards** — cards generated from the active curriculum, with FSRS-inspired stability/difficulty scheduling.
+- **Adaptive quiz mode** — weak concepts receive recall prompts; stronger concepts receive application and edge-case prompts.
+- **Socratic explainer** — guided discovery through one focused question at a time.
+- **Shared concept graph** — all modes read and update one prerequisite graph and mastery substrate.
+- **Note ingestion** — upload text/Markdown/CSV/JSON and attach extracted concepts to a goal.
+- **Automatic replanning** — repeated low mastery inserts targeted review into the next unfinished day and records the adjustment.
+- **Learner profiles** — multiple local profiles with isolated goal lists.
 - **Verified resources** — a built-in web-search tool finds *real* links for each day and a verifier agent confirms which exist, so suggestions aren't hallucinated.
 - **Calibrated LLM grading** with feedback, confidence, and named knowledge gaps.
 - **Per-concept mastery tracking** via a recency-biased EMA.
@@ -64,7 +80,9 @@ Every LLM call goes through a **local gateway** that rotates across providers tr
 ┌──────────────────────────────────────────────────────────────────┐
 │  Browser  (HTMX + Jinja, no SPA build step)                      │
 │  /              goal entry · streams thinking · redirects on done │
-│  /goals/{id}    plan view · refine chat · mastery                 │
+│  /goals/{id}    Today: recommended lesson + next actions          │
+│  /goals/{id}/roadmap  Journey: milestones, targets, progress      │
+│  /goals/{id}/lab      Practice: review, quiz, guided help, notes  │
 │  /goals/{id}/feynman  explain-a-concept loop (Feynman mode)       │
 │  /days/{id}     check-in flow · verify real resources             │
 │  /status        live gateway dashboard                            │
@@ -78,7 +96,7 @@ Every LLM call goes through a **local gateway** that rotates across providers tr
 │  • Grader agent       (pinned: Groq)                              │
 │  • Feynman tutor      (pinned: Groq)                              │
 │  • Resource verifier  (pinned: Groq) ← web-search tool           │
-│  • learning.db ← goals, plans, mastery, check_ins, feynman, resources │
+│  • learning.db ← plans, mastery, milestones, targets, practice state │
 └────────────────────────────┬─────────────────────────────────────┘
                              │ HTTP (gateway's OpenAI-compat shim)
                              ▼
@@ -221,6 +239,17 @@ Point any OpenAI-compatible client (Cursor, Continue, LangChain, the OpenAI SDK)
 | `GET` | `/api/goals/{id}/feynman/latest?concept=` | Latest completed Feynman session for a concept. |
 | `POST` | `/api/days/{id}/resources/verify` | Web-search + verify this day's resources; attaches real URLs. |
 | `GET` | `/api/days/{id}/resources` | Latest verified resources for a day. |
+| `GET` | `/api/goals/{id}/flashcards` | List cards or the due review queue. |
+| `POST` | `/api/goals/{id}/flashcards/generate` | Generate a quality-checked professional review deck. |
+| `POST` | `/api/flashcards/{id}/review` | Schedule the next review and update mastery. |
+| `POST` | `/api/adaptive/start` · `/api/adaptive/answer` | Run a mastery-targeted quiz. |
+| `POST` | `/api/socratic/start` · `/api/socratic/reply` | Run a guided Socratic session. |
+| `GET` | `/api/goals/{id}/concept-graph` | Shared concepts, prerequisites, and mastery. |
+| `POST` | `/api/goals/{id}/notes` | Upload and ingest a UTF-8 note file. |
+| `GET` · `POST` | `/api/users` | List or create local learner profiles. |
+| `GET` | `/api/goals/{id}/roadmap` | Fetch milestones, mastery progress, and personal targets. |
+| `POST` | `/api/goals/{id}/targets` | Add a persistent target to a learning journey. |
+| `PATCH` · `DELETE` | `/api/targets/{id}` | Complete or remove a personal target. |
 
 ---
 
@@ -246,14 +275,14 @@ praxis/
     │
     ├── learning/               # ─── agentic learning loop
     │   ├── models.py               # Plan, PlanDay, Question, GradedAnswer, FeynmanTurn, ResourceCheck, ...
-    │   ├── agents.py               # Pydantic AI agents (planner, check-in, grader, feynman, verifier)
+    │   ├── agents.py               # Agents, prompts, quality validation, flashcard generation
     │   ├── search.py               # keyless web-search tool (DuckDuckGo) for resource verification
     │   ├── db.py                   # learning.db schema + ops
-    │   └── routes.py               # /api/goals, /api/days/*, /api/feynman/*, /api/.../resources
+    │   └── routes.py               # Goals, lessons, practice modes, roadmap, targets
     │
     └── web/                    # ─── server-rendered UI
-        ├── routes.py               # /, /goals/{id}, /days/{id}, /status
-        ├── templates/              # Jinja: base, index, plan, day, status
+        ├── routes.py               # Home, Today, Journey, Practice, lessons, status
+        ├── templates/              # Jinja pages, including lab and roadmap
         └── static/style.css
 ```
 
@@ -263,7 +292,9 @@ praxis/
 
 **Pydantic everywhere.** Every LLM call returns a Pydantic-validated structure — no regex-parsing of model output. Invalid JSON triggers an auto-retry with the validation error fed back to the model. This is the foundation that makes chained agents reliable.
 
-**"Show your work" as a hard constraint.** Every agent output schema includes `reasoning` and `self_check` fields the model cannot skip. This forces real reasoning over fluent confidence and gives you a UI trail to debug outputs.
+**Quality checks beyond schema validation.** Pydantic validates structure, then deterministic instructional checks reject vague activities, missing milestones, weak rubrics, invalid concepts, fabricated resource URLs, and inconsistent grading.
+
+**Progressive disclosure.** Learners see one recommended action first. The full schedule lives under Journey, optional learning modes live under Practice, and provider/reasoning details remain secondary.
 
 **Many agents, right-sized providers.** Different jobs → different prompts, schemas, and pinned models: Planner → Gemini (long context, once per goal); Check-in, Grader, Feynman tutor, and resource verifier → Groq (fast, called interactively).
 
@@ -275,21 +306,29 @@ praxis/
 
 ---
 
-## 11. Roadmap
+## 11. Learning modes
 
-Praxis is designed to host **five learning modes** over one shared substrate (concept graph + mastery state). v0.1 ships mode 1.
+Praxis hosts **five learning modes** over one shared substrate (concept graph + mastery state).
 
 | # | Mode | What it does | Status |
 |---|---|---|---|
 | 1 | **Curriculum agent** | Day-by-day plan + daily check-in + replanning | ✅ Shipped |
 | 2 | **Feynman checks** | You explain a concept; the agent finds gaps and asks follow-ups until your explanation is solid | ✅ Shipped |
-| 3 | **Spaced-repetition flashcards** | Extract facts from notes, write cards, schedule reviews (FSRS), fuzzy-grade recall | 🔜 Planned |
-| 4 | **Adaptive quiz** | Targets weak spots; harder when you're solid, easier when you struggle | 🔜 Planned |
-| 5 | **Socratic explainer** | Teaches by asking questions that lead you to the answer | 🔜 Planned |
+| 3 | **Spaced-repetition flashcards** | Generate curriculum cards, schedule reviews, update mastery | ✅ Shipped |
+| 4 | **Adaptive quiz** | Targets weak spots; harder when you're solid, easier when you struggle | ✅ Shipped |
+| 5 | **Socratic explainer** | Teaches by asking questions that lead you to the answer | ✅ Shipped |
 
 **Also shipped:** a built-in **web-search tool** + **resource-verifier agent** so suggested resources are confirmed against real links (closes the planner's "don't invent URLs" gap). The search tool is keyless (DuckDuckGo HTML) and cleanly isolated, so it can later be swapped for an MCP search server.
 
-**Still planned:** file ingestion via MCP, automatic re-planning when mastery drifts, a cross-mode concept graph, and multi-user support.
+**Also shipped in v0.2:** UTF-8 file/note ingestion through an MCP-ready HTTP boundary, automatic mastery-drift adjustments, a cross-mode concept graph, and multiple local learner profiles.
+
+The profile system is intentionally local-first and does not provide passwords, authorization, or tenant security. Add an authentication layer before exposing Praxis to an untrusted network.
+
+### Tests
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run --with pytest pytest -q
+```
 
 ---
 
