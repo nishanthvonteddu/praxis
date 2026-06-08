@@ -2,18 +2,38 @@
 {% block title %}Praxis — Learn anything{% endblock %}
 {% block content %}
 
-<section class="hero">
-  <h1>What do you want to learn?</h1>
-  <p class="sub">Tell Praxis a goal. It builds a day-by-day plan, quizzes you each day,
-  tracks what you actually know, and adapts.</p>
+<section class="home-intro">
+  <div class="intro-copy">
+    <h1>Turn a learning goal into daily practice.</h1>
+    <p class="sub">Praxis gives you one clear next step each day, then adapts the journey as your understanding grows.</p>
+    <div class="feature-line" aria-label="Core features">
+      <span>Daily guidance</span>
+      <span>Focused practice</span>
+      <span>Visible progress</span>
+    </div>
+  </div>
 
   <form id="goal-form" class="goal-form">
+    <div class="form-heading">
+      <div>
+        <p class="eyebrow">New curriculum</p>
+        <h2>Define your goal</h2>
+      </div>
+      <div class="profile-control">
+        <select name="user_id" id="user-profile" aria-label="Learner profile">
+          {% for user in users %}
+            <option value="{{ user.id }}" {% if user.id == active_user_id %}selected{% endif %}>{{ user.name }}</option>
+          {% endfor %}
+        </select>
+        <button type="button" class="icon-btn" id="add-profile" title="Add learner profile" aria-label="Add learner profile">+</button>
+      </div>
+    </div>
     <label>
-      <span>Learning goal</span>
-      <textarea name="text" rows="3" required minlength="8"
+      <span>What should you be able to do?</span>
+      <textarea name="text" rows="4" required minlength="8"
                 placeholder="e.g. Understand the transformer architecture well enough to implement one from scratch"></textarea>
     </label>
-    <div class="row">
+    <div class="form-grid">
       <label>
         <span>Current level</span>
         <select name="level">
@@ -26,17 +46,23 @@
         <span>Deadline (days)</span>
         <input type="number" name="deadline_days" min="1" max="90" value="7" required>
       </label>
+    </div>
+    <details class="advanced-settings">
+      <summary>Advanced settings</summary>
       <label>
-        <span>Model</span>
+        <span>AI provider</span>
         <select name="provider">
-          <option value="auto" {% if planner_default == 'auto' %}selected{% endif %}>Auto (failover order)</option>
+          <option value="auto" {% if planner_default == 'auto' %}selected{% endif %}>Choose automatically</option>
           {% for p in providers %}
             <option value="{{ p }}" {% if p == planner_default %}selected{% endif %}>{{ p }}</option>
           {% endfor %}
         </select>
       </label>
+    </details>
+    <div class="form-actions">
+      <p class="muted small">The plan streams live and can be refined later.</p>
+      <button type="submit" class="primary" id="generate-btn">Generate learning plan</button>
     </div>
-    <button type="submit" class="primary" id="generate-btn">Generate plan →</button>
   </form>
 
   <div id="thinking-panel" class="thinking-panel" hidden>
@@ -50,20 +76,35 @@
 </section>
 
 {% if goals %}
-<section class="past">
-  <h2>Past goals</h2>
+<section class="past section-block">
+  <header class="section-heading">
+    <div>
+      <h2>Continue learning</h2>
+    </div>
+    <span class="section-count">{{ goals|length }} active</span>
+  </header>
   <ul class="goal-list">
     {% for g in goals %}
       <li data-goal-id="{{ g.id }}">
         <a href="/goals/{{ g.id }}">
-          <span class="goal-text">{{ g.text }}</span>
-          <span class="muted small">{{ g.level }} · {{ g.deadline_days }} days · {{ g.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+          <span class="goal-index">{{ '%02d'|format(loop.index) }}</span>
+          <span class="goal-main">
+            <span class="goal-text">{{ g.text }}</span>
+            <span class="muted small">{{ g.level }} · {{ g.deadline_days }} days · started {{ g.created_at.strftime('%b %d') }}</span>
+          </span>
+          <span class="row-arrow">→</span>
         </a>
         <button type="button" class="goal-delete" data-goal-id="{{ g.id }}"
                 title="Delete this goal" aria-label="Delete goal">✕</button>
       </li>
     {% endfor %}
   </ul>
+</section>
+{% else %}
+<section class="empty-workspace section-block">
+  <p class="eyebrow">Workspace</p>
+  <h2>No learning goals yet</h2>
+  <p class="muted">Create your first plan above. It will appear here with progress and practice modes.</p>
 </section>
 {% endif %}
 
@@ -75,6 +116,21 @@ const status = document.getElementById('thinking-status');
 const meta = document.getElementById('thinking-meta');
 const btn = document.getElementById('generate-btn');
 
+document.getElementById('user-profile').addEventListener('change', (e) => {
+  window.location = `/?user_id=${e.target.value}`;
+});
+document.getElementById('add-profile').addEventListener('click', async () => {
+  const name = prompt('Learner profile name');
+  if (!name || !name.trim()) return;
+  const r = await fetch('/api/users', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: name.trim()}),
+  });
+  const d = await r.json();
+  if (!r.ok) { alert(d.detail || 'Could not create profile'); return; }
+  window.location = `/?user_id=${d.id}`;
+});
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const fd = new FormData(form);
@@ -84,6 +140,7 @@ form.addEventListener('submit', async (e) => {
     level: fd.get('level'),
     deadline_days: parseInt(fd.get('deadline_days'), 10),
     provider: provider === 'auto' ? null : provider,
+    user_id: parseInt(fd.get('user_id'), 10),
   };
 
   btn.disabled = true;

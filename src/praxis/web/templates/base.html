@@ -9,14 +9,23 @@
 </head>
 <body>
   <header class="topbar">
-    <a href="/" class="brand">▲ Praxis</a>
-    <nav>
-      <a href="/">Home</a>
-      <a href="/status">Gateway</a>
+    <a href="/" class="brand">
+      <span class="brand-mark">P</span>
+      <span>Praxis</span>
+    </a>
+    <nav aria-label="Primary navigation">
+      <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">My learning</a>
+      <a href="/status" class="{{ 'active' if request.url.path == '/status' else '' }}">
+        <span class="nav-status-dot"></span>System status
+      </a>
     </nav>
   </header>
   <main>
     {% block content %}{% endblock %}
   </main>
+  <footer class="site-footer">
+    <span>Praxis local learning workspace</span>
+    <a href="/docs">API docs</a>
+  </footer>
 </body>
 </html>
