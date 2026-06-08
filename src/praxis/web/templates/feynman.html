@@ -3,10 +3,12 @@
 {% block content %}
 
 <section class="feynman-page">
-  <a href="/goals/{{ goal.id }}" class="muted small">← Back to plan</a>
-  <h1>🧠 Explain it: <em>{{ concept }}</em></h1>
-  <p class="sub">Teach this concept in your own words. The tutor finds the gaps and keeps
-  asking until your explanation is solid — then it updates your mastery score.</p>
+  <a href="/goals/{{ goal.id }}" class="back-link">← Back to plan</a>
+  <header class="focus-header">
+    <p class="eyebrow">Feynman mode</p>
+    <h1>Explain <em>{{ concept }}</em></h1>
+    <p class="sub">Teach it plainly. The tutor will identify the weakest part of your explanation and probe until it is solid.</p>
+  </header>
 
   {% if latest %}
     <details class="past-answer">

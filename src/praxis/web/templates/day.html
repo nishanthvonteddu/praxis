@@ -2,15 +2,22 @@
 {% block title %}Day {{ day.day_num }} · {{ day.topic }}{% endblock %}
 {% block content %}
 
-<section>
-  <a href="javascript:history.back()" class="muted small">← Back to plan</a>
-  <h1>Day {{ day.day_num }}: {{ day.topic }}</h1>
-  <p class="muted">Status: <strong>{{ day.status }}</strong></p>
+<section class="day-page">
+  <a href="/goals/{{ goal.id }}" class="back-link">← Today</a>
+  <header class="day-header">
+    <div>
+      <p class="section-label">Day {{ day.day_num }} lesson</p>
+      <h1>{{ day.topic }}</h1>
+      <p class="muted">{{ day.objective }}</p>
+    </div>
+    <span class="status-pill status-{{ day.status }}">{{ day.status|replace('_', ' ') }}</span>
+  </header>
 
-  <h3>Objective</h3>
-  <p>{{ day.objective }}</p>
-
-  <h3>Concepts</h3>
+  <div class="day-layout">
+  <div class="day-primary">
+  <section class="content-section" id="learn">
+  <p class="section-label">Step 1</p>
+  <h2>Concepts</h2>
   <ul class="concepts">
     {% for c in day.concepts %}
       <li>{{ c }}
@@ -19,23 +26,58 @@
       </li>
     {% endfor %}
   </ul>
+  </section>
 
   {% if day.activities %}
-    <h3>Activities</h3>
-    <ul>
-      {% for a in day.activities %}<li>{{ a }}</li>{% endfor %}
+    <section class="content-section" id="practice">
+    <p class="section-label">Step 2</p>
+    <h2>Activities</h2>
+    <ul class="activity-list">
+      {% for a in day.activities %}<li><span>{{ loop.index }}</span>{{ a }}</li>{% endfor %}
     </ul>
+    </section>
   {% endif %}
 
+  <section class="content-section" id="check">
+  <p class="section-label">Step 3</p>
+  <h2>Check your understanding</h2>
+  <p class="muted">Answer three focused questions. Praxis uses the result to choose what comes next.</p>
+  <div class="checkin-area">
+  {% if latest %}
+    <div class="last-score"><strong>{{ '%.0f' | format(latest.overall_score * 100) }}%</strong><span>last score</span></div>
+    {% for a in latest.answers %}
+      <details class="past-answer">
+        <summary>{{ a.question.kind | upper }} — {{ a.question.concept }} ({{ '%.2f' | format(a.grade.score) }})
+          {% if a.grade.confidence %}<span class="conf conf-{{ a.grade.confidence }}">{{ a.grade.confidence }}</span>{% endif %}
+        </summary>
+        <p><strong>Question:</strong> {{ a.question.prompt }}</p>
+        <p><strong>Your answer:</strong> {{ a.answer_text }}</p>
+        <p><strong>Feedback:</strong> {{ a.grade.feedback }}</p>
+        {% if a.grade.gaps %}<p><strong>Gaps:</strong> {{ a.grade.gaps | join(', ') }}</p>{% endif %}
+      </details>
+    {% endfor %}
+    <button class="primary" id="restart-btn" hx-post="/api/days/{{ day.id }}/checkin/start" hx-target="#checkin" hx-swap="innerHTML" hx-indicator="#loading">Start another check-in</button>
+  {% else %}
+    <button class="primary" hx-post="/api/days/{{ day.id }}/checkin/start" hx-target="#checkin" hx-swap="innerHTML" hx-indicator="#loading">Start check-in</button>
+  {% endif %}
+  <div id="loading" class="htmx-indicator muted">Designing questions…</div>
+  <div id="checkin"></div>
+  </div>
+  </section>
+  </div>
+
+  <aside class="day-sidebar">
   {% if day.suggested_resources %}
-    <h3>Suggested resources <span class="muted small">(planner suggestions — not yet verified)</span></h3>
+    <p class="section-label">Suggested resources</p>
+    <h2>Resources</h2>
     <ul>
       {% for r in day.suggested_resources %}<li>{{ r }}</li>{% endfor %}
     </ul>
   {% endif %}
 
-  <h3>Verified resources <span class="muted small">(real links, checked via web search)</span></h3>
-  <button class="primary" id="verify-btn">🔎 Find &amp; verify real resources</button>
+  <h3>Verified links</h3>
+  <p class="muted small">Search and verify real URLs before opening a resource.</p>
+  <button class="secondary-btn" id="verify-btn">Find verified resources</button>
   <div id="verify-loading" class="muted" hidden>Searching the web and verifying links…</div>
   <div id="resources-out">
     {% if resources %}
@@ -61,45 +103,8 @@
     {% endif %}
   </div>
 
-  <hr>
-
-  <h2>Check-in</h2>
-
-  {% if latest %}
-    <p class="muted">Last completed score: <strong>{{ '%.0f' | format(latest.overall_score * 100) }}%</strong></p>
-    {% for a in latest.answers %}
-      <details class="past-answer">
-        <summary>{{ a.question.kind | upper }} — {{ a.question.concept }} ({{ '%.2f' | format(a.grade.score) }})
-          {% if a.grade.confidence %}<span class="conf conf-{{ a.grade.confidence }}">conf: {{ a.grade.confidence }}</span>{% endif %}
-        </summary>
-        <p><strong>Q:</strong> {{ a.question.prompt }}</p>
-        <p><strong>Your answer:</strong> {{ a.answer_text }}</p>
-        <p><strong>Feedback:</strong> {{ a.grade.feedback }}</p>
-        {% if a.grade.gaps %}<p><strong>Gaps:</strong> {{ a.grade.gaps | join(', ') }}</p>{% endif %}
-        {% if a.grade.reasoning or a.grade.self_check %}
-          <details class="thinking nested">
-            <summary>🧠 Grader's thinking</summary>
-            {% if a.grade.reasoning %}<p><strong>Reasoning:</strong> {{ a.grade.reasoning }}</p>{% endif %}
-            {% if a.grade.self_check %}<p><strong>Self-check:</strong> {{ a.grade.self_check }}</p>{% endif %}
-          </details>
-        {% endif %}
-      </details>
-    {% endfor %}
-    <button class="primary" id="restart-btn"
-            hx-post="/api/days/{{ day.id }}/checkin/start"
-            hx-target="#checkin"
-            hx-swap="innerHTML"
-            hx-indicator="#loading">Start a new check-in</button>
-  {% else %}
-    <button class="primary"
-            hx-post="/api/days/{{ day.id }}/checkin/start"
-            hx-target="#checkin"
-            hx-swap="innerHTML"
-            hx-indicator="#loading">Start check-in</button>
-  {% endif %}
-
-  <div id="loading" class="htmx-indicator muted">Designing questions…</div>
-  <div id="checkin"></div>
+  </aside>
+  </div>
 </section>
 
 <script>
